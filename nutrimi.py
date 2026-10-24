@@ -1,10 +1,13 @@
 import streamlit as st
 import gspread
 import pandas as pd
+import json
+import tempfile
 
 st.title("Nutrimi 🥗")
 
-creds_dict = {
+# Creazione di un file JSON temporaneo con le credenziali per aggirare i problemi di formattazione della chiave RSA
+creds_data = {
     "type": "service_account",
     "project_id": st.secrets["project_id"],
     "private_key_id": st.secrets["private_key_id"],
@@ -17,8 +20,13 @@ creds_dict = {
     "client_x509_cert_url": "https://www.googleapis.com/robot/v1/metadata/x509/nutrimi-bot%40nutrimi-512520.iam.gserviceaccount.com"
 }
 
-# Connessione a Google Sheets tramite gspread
-gc = gspread.service_account_from_dict(creds_dict)
+# Scrive i dati in un file JSON temporaneo sicuro sul server
+with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as f:
+    json.dump(creds_data, f)
+    temp_creds_path = f.name
+
+# Connessione a Google Sheets leggendo il file temporaneo
+gc = gspread.service_account(filename=temp_creds_path)
 sh = gc.open_by_url(st.secrets["spreadsheet"])
 worksheet = sh.worksheet(st.secrets["worksheet"])
 

@@ -4,11 +4,15 @@ import pandas as pd
 
 st.title("Nutrimi 🥗")
 
+# Pulisce e normalizza la chiave privata gestendo eventuali caratteri di Windows (\r\n)
+raw_private_key = st.secrets["private_key"]
+fixed_private_key = raw_private_key.replace("\r\n", "\n").strip()
+
 creds_dict = {
     "type": "service_account",
     "project_id": st.secrets["project_id"],
     "private_key_id": st.secrets["private_key_id"],
-    "private_key": st.secrets["private_key"],
+    "private_key": fixed_private_key,
     "client_email": st.secrets["client_email"],
     "client_id": st.secrets["client_id"],
     "token_uri": st.secrets["token_uri"],

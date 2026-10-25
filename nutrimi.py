@@ -1,4 +1,3 @@
-
 import json
 from datetime import date, timedelta
 
@@ -383,8 +382,12 @@ st.divider()
 # ==========================================
 st.subheader(f"2. 🍳 Componi Piatto / Pasto per [{utente_selezionato}]")
 
+# Il contatore cambia ad ogni salvataggio: i campi si azzerano da soli
+n_reset = st.session_state.get("reset_n", 0)
+
 nome_piatto = st.text_input(
-    "Nome del Piatto / Preparazione (es. Brodo Vegetale)", key="inp_nome_piatto"
+    "Nome del Piatto / Preparazione (es. Brodo Vegetale)",
+    key=f"inp_nome_piatto_{n_reset}",
 )
 data_piatto = st.date_input(
     "Seleziona la Data in cui consumi questo piatto",
@@ -396,7 +399,7 @@ data_str = str(data_piatto)
 selected_ingredients = st.multiselect(
     "Seleziona gli ingredienti che compongono il piatto",
     ingredienti_ordinati,
-    key="sel_ing_piatto",
+    key=f"sel_ing_piatto_{n_reset}",
 )
 quantita_ingredienti = {}
 volume_finale = 0.0
@@ -406,31 +409,41 @@ preview_totali = {k: 0.0 for k in CHIAVI}
 if selected_ingredients:
     st.markdown("##### ⚖️ Specifica le quantità iniziali per ogni ingrediente:")
     for ing in selected_ingredients:
-        quantita_ingredienti[ing] = st.number_input(
+        q = st.number_input(
             f"Quantità usata di '{ing}' (g o ml)",
-            value=0.0,
+            value=None,
+            min_value=0.0,
             step=1.0,
-            key=f"qty_piatto_{ing}",
+            placeholder="0",
+            key=f"qty_piatto_{ing}_{n_reset}",
         )
+        quantita_ingredienti[ing] = float(q) if q else 0.0
 
     somma_qta_iniziale = sum(quantita_ingredienti.values())
 
     st.markdown("---")
 
-    volume_finale = st.number_input(
-        "💧 Volume totale della preparazione dopo la cottura (ml) [es. se parti"
-        " da 1500 e arrivi a 700, inserisci 700]",
-        value=float(somma_qta_iniziale),
+    vol_in = st.number_input(
+        "💧 Volume totale dopo la cottura (ml) [lascia vuoto se è uguale alla"
+        " somma degli ingredienti; es. parti da 1500 e arrivi a 700, scrivi 700]",
+        value=None,
+        min_value=0.0,
         step=10.0,
-        key="inp_volume_finale",
+        placeholder=f"vuoto = {somma_qta_iniziale:.0f}",
+        key=f"inp_volume_finale_{n_reset}",
     )
-    quantita_consumata = st.number_input(
-        "🍽️ Quantità effettivamente consumata in questo pasto (ml o g) [es."
-        " quanta parte dei 700 ml mangi adesso]",
-        value=float(volume_finale),
+    volume_finale = float(vol_in) if vol_in else float(somma_qta_iniziale)
+
+    cons_in = st.number_input(
+        "🍽️ Quantità consumata in questo pasto (ml o g) [lascia vuoto se"
+        " consumi tutto]",
+        value=None,
+        min_value=0.0,
         step=10.0,
-        key="inp_qta_consumata",
+        placeholder=f"vuoto = {volume_finale:.0f}",
+        key=f"inp_qta_consumata_{n_reset}",
     )
+    quantita_consumata = float(cons_in) if cons_in else float(volume_finale)
 
     totali_ingredienti = {k: 0.0 for k in CHIAVI}
     db_base = dati_app["database"]
@@ -474,9 +487,10 @@ if st.button("🚀 Calcola e Aggiungi Piatto al Riepilogo Giornaliero"):
             "quantita_consumata": quantita_consumata,
         }
         salva_dati(dati_app)
-        st.success(
-            f"Piatto '{nome_piatto}' (porzione di {quantita_consumata} ml) aggiunto"
-            f" per {utente_selezionato} nel giorno {data_str}!"
+        st.session_state["reset_n"] = n_reset + 1
+        st.session_state["msg_piatto"] = (
+            f"Piatto '{nome_piatto.strip()}' aggiunto per {utente_selezionato}"
+            f" nel giorno {data_str}!"
         )
         st.rerun()
     else:
@@ -485,8 +499,8 @@ if st.button("🚀 Calcola e Aggiungi Piatto al Riepilogo Giornaliero"):
             " maggiore di 0."
         )
 
-st.divider()
-
+if "msg_piatto" in st.session_state:
+    st.success(st.session_state.pop("msg_piatto"))
 # ==========================================
 # SEZIONE 3: RIEPILOGO, PARAMETRI VITALI E TARGET
 # ==========================================

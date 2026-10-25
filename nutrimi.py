@@ -12,7 +12,7 @@ gc = gspread.service_account_from_dict(json.loads(st.secrets["gcp_json"]))
 st.write("Email usata dal bot:", json.loads(st.secrets["gcp_json"])["client_email"])
 st.write("Fogli visibili al bot:", [f["name"] for f in gc.list_spreadsheet_files()])
 
-sh = gc.open_by_url("https://docs.google.com/spreadsheets/d/1KbZzYVapAOS837QuWUnJ6oERICuvzD5WZSObe9Owgs/edit")
+sh = gc.open("Nutrimi")
 worksheet = sh.worksheet("Foglio1")
 
 # Lettura dei dati in un DataFrame Pandas

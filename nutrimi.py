@@ -4,7 +4,28 @@ from datetime import date, timedelta
 import gspread
 import streamlit as st
 
-st.set_page_config(page_title="Nutrimi", page_icon="💧", layout="wide")
+st.set_page_config(
+    page_title="Nutrimi",
+    page_icon="💧",
+    layout="centered",
+    initial_sidebar_state="collapsed",
+)
+
+# Caratteri più grandi, pulsanti larghi, niente scorrimento laterale
+st.markdown(
+    """
+<style>
+html { font-size: 19px; }
+.block-container { padding: 1rem 0.9rem 4rem 0.9rem; max-width: 720px; }
+.stButton > button, .stFormSubmitButton > button {
+    width: 100%; min-height: 3rem; font-size: 1.05rem;
+}
+input, textarea { font-size: 1.05rem !important; }
+div[role="radiogroup"] { gap: 0.3rem 0.8rem; }
+</style>
+""",
+    unsafe_allow_html=True,
+)
 
 # ==========================================
 # CONFIGURAZIONE
@@ -72,7 +93,14 @@ DEFAULT_OBIETTIVI = {
     "zinco": 8.0, "manganese": 1.8, "silicio": 15.0,
 }
 
-# (chiave, etichetta, passo) per i target modificabili nella sidebar
+CAMPI_PRINCIPALI = [
+    ("acqua", "Target Liquidi (ml)", 50.0),
+    ("kcal", "Calorie (kcal)", 10.0),
+    ("prot", "Proteine (g)", 1.0),
+    ("carb", "Carboidrati (g)", 1.0),
+    ("grassi", "Grassi (g)", 1.0),
+    ("fibre", "Fibre (g)", 1.0),
+]
 CAMPI_TARGET = [
     ("potassio", "Potassio (mg)", 50.0),
     ("calcio", "Calcio (mg)", 50.0),
@@ -87,13 +115,26 @@ CAMPI_TARGET = [
     ("vit_a", "Vit. A (mcg)", 50.0),
     ("vit_b6", "Vit. B6 (mg)", 0.1),
 ]
-CAMPI_PRINCIPALI = [
-    ("acqua", "Target Liquidi (ml)", 50.0),
-    ("kcal", "Calorie (kcal)", 10.0),
-    ("prot", "Proteine (g)", 1.0),
-    ("carb", "Carboidrati (g)", 1.0),
-    ("grassi", "Grassi (g)", 1.0),
-    ("fibre", "Fibre (g)", 1.0),
+CAMPI_INGREDIENTE = [
+    ("kcal", "Calorie (kcal)", 0.1),
+    ("prot", "Proteine (g)", 0.1),
+    ("carb", "Carboidrati totali (g)", 0.1),
+    ("zuccheri", "di cui Zuccheri (g)", 0.1),
+    ("grassi", "Grassi (g)", 0.1),
+    ("fibre", "Fibre (g)", 0.1),
+    ("acqua", "Acqua / Liquidi (ml per 100g)", 1.0),
+    ("sodio", "Sodio (mg)", 0.1),
+    ("potassio", "Potassio (mg)", 0.1),
+    ("calcio", "Calcio (mg)", 0.1),
+    ("magnesio", "Magnesio (mg)", 0.1),
+    ("ferro", "Ferro (mg)", 0.1),
+    ("fosforo", "Fosforo (mg)", 0.1),
+    ("zinco", "Zinco (mg)", 0.01),
+    ("manganese", "Manganese (mg)", 0.01),
+    ("silicio", "Silicio (mg)", 0.1),
+    ("vit_c", "Vit. C (mg)", 0.1),
+    ("vit_a", "Vit. A (mcg)", 0.1),
+    ("vit_b6", "Vit. B6 (mg)", 0.01),
 ]
 
 
@@ -192,114 +233,450 @@ def salva_dati(dati):
     leggi_da_sheet.clear()
 
 
+def calcola_totali_giorno(piatti_giorno):
+    totali = {k: 0.0 for k in CHIAVI}
+    for info in piatti_giorno.values():
+        nutrienti = info.get("nutrienti", {})
+        for chiave in CHIAVI:
+            totali[chiave] += float(nutrienti.get(chiave, 0.0))
+    return totali
+
+
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
-st.session_state.dati = carica_dati()
-dati_app = st.session_state.dati
+dati_app = carica_dati()
 
-st.title("💧 Calcolatore Nutrizionale e Salute (Multi-Utente)")
+# ==========================================
+# INTESTAZIONE: PROFILO E MENU A PAGINE
+# ==========================================
+st.title("💧 Nutrimi")
 
-if st.sidebar.checkbox("🔄 Aggiornamento automatico (30 s)", value=False):
+utenti_disponibili = list(dati_app["utenti"].keys())
+utente_selezionato = st.selectbox(
+    "👤 Profilo", utenti_disponibili, key="sel_profilo"
+)
+
+PAGINE = ["🍳 Pasto", "📊 Oggi", "🩺 Vitali", "📈 Medie", "🥕 Alimenti", "👤 Profilo"]
+pagina = st.radio(
+    "Pagina", PAGINE, horizontal=True, key="pagina", label_visibility="collapsed"
+)
+st.divider()
+
+if st.session_state.get("auto_ref") and pagina in ("📊 Oggi", "📈 Medie"):
     from streamlit_autorefresh import st_autorefresh
 
     st_autorefresh(interval=30000, key="auto_refresh")
-
-# ==========================================
-# SIDEBAR: GESTIONE PROFILI E ANAGRAFICA
-# ==========================================
-st.sidebar.header("👤 Gestione Profili")
-utenti_disponibili = list(dati_app["utenti"].keys())
-utente_selezionato = st.sidebar.selectbox(
-    "Seleziona Profilo Attivo", utenti_disponibili, key="sel_profilo"
-)
-
-nuovo_nome_utente = st.sidebar.text_input(
-    "Aggiungi Nuovo Profilo", key="txt_nuovo_profilo"
-)
-if st.sidebar.button("Crea Profilo", key="btn_crea_profilo"):
-    nome = nuovo_nome_utente.strip()
-    if nome and nome not in dati_app["utenti"]:
-        dati_app["utenti"][nome] = nuovo_utente()
-        salva_dati(dati_app)
-        st.sidebar.success(f"Profilo '{nome}' creato!")
-        st.rerun()
-
-st.sidebar.divider()
 
 dati_utente = dati_app["utenti"][utente_selezionato]
 registro_utente = dati_utente["registro"]
 obiettivi_utente = dati_utente["obiettivi"]
 anagrafica_utente = dati_utente["anagrafica"]
 parametri_vitali_utente = dati_utente["parametri_vitali"]
+ingredienti_ordinati = sorted(dati_app["database"].keys())
 
-# Quando cambio profilo, ricarico i widget con i dati di quel profilo
-if st.session_state.get("profilo_caricato") != utente_selezionato:
-    st.session_state["anag_sesso"] = anagrafica_utente.get("sesso", "Donna")
-    st.session_state["anag_eta"] = int(anagrafica_utente.get("eta", 92))
-    st.session_state["anag_alt"] = float(anagrafica_utente.get("altezza", 150.0))
-    st.session_state["anag_peso"] = float(anagrafica_utente.get("peso", 55.0))
-    mob = anagrafica_utente.get("mobilita", MOBILITA_OPZIONI[0])
-    st.session_state["anag_mob"] = mob if mob in MOBILITA_OPZIONI else MOBILITA_OPZIONI[0]
-    st.session_state["anag_ricalc"] = True
-    for chiave, default in DEFAULT_OBIETTIVI.items():
-        st.session_state[f"t_{chiave}"] = float(obiettivi_utente.get(chiave, default))
-    st.session_state["profilo_caricato"] = utente_selezionato
+# ==========================================
+# PAGINA: PASTO
+# ==========================================
+if pagina == "🍳 Pasto":
+    st.subheader("Componi piatto / pasto")
 
+    if "msg_piatto" in st.session_state:
+        st.success(st.session_state.pop("msg_piatto"))
 
-def aggiorna_valori():
-    if not st.session_state.get("anag_ricalc", True):
-        return
-    targ = calcola_target_automatici(
-        st.session_state["anag_sesso"],
-        int(st.session_state["anag_eta"]),
-        float(st.session_state["anag_alt"]),
-        float(st.session_state["anag_peso"]),
-        st.session_state["anag_mob"],
-    )
-    for chiave, valore in targ.items():
-        st.session_state[f"t_{chiave}"] = valore
+    # Il contatore cambia ad ogni salvataggio: i campi si azzerano da soli
+    n_reset = st.session_state.get("reset_n", 0)
 
+    nome_piatto = st.text_input(
+        "Nome del piatto (es. Brodo vegetale)", key=f"inp_nome_piatto_{n_reset}"
+    )
+    data_piatto = st.date_input(
+        "Data del pasto", value=date.today(), key="inp_data_piatto"
+    )
+    data_str = str(data_piatto)
 
-with st.sidebar.expander(
-    f"⚙️ Anagrafica e Target [{utente_selezionato}]", expanded=False
-):
-    st.markdown("**Dati Anagrafici:**")
-    sesso_val = st.selectbox(
-        "Sesso", ["Donna", "Uomo"], key="anag_sesso", on_change=aggiorna_valori
+    selected_ingredients = st.multiselect(
+        "Ingredienti del piatto",
+        ingredienti_ordinati,
+        key=f"sel_ing_piatto_{n_reset}",
     )
-    eta_val = st.number_input(
-        "Età (anni)", step=1, key="anag_eta", on_change=aggiorna_valori
+    quantita_ingredienti = {}
+    volume_finale = 0.0
+    quantita_consumata = 0.0
+    preview_totali = {k: 0.0 for k in CHIAVI}
+
+    if selected_ingredients:
+        st.markdown("##### ⚖️ Quantità di ogni ingrediente")
+        for ing in selected_ingredients:
+            q = st.number_input(
+                f"{ing} (g o ml)",
+                value=None,
+                min_value=0.0,
+                step=1.0,
+                placeholder="0",
+                key=f"qty_piatto_{ing}_{n_reset}",
+            )
+            quantita_ingredienti[ing] = float(q) if q else 0.0
+
+        somma_qta_iniziale = sum(quantita_ingredienti.values())
+
+        vol_in = st.number_input(
+            "💧 Volume totale dopo la cottura (ml). Lascia vuoto se è uguale"
+            " alla somma degli ingredienti; se parti da 1500 e arrivi a 700,"
+            " scrivi 700.",
+            value=None,
+            min_value=0.0,
+            step=10.0,
+            placeholder=f"vuoto = {somma_qta_iniziale:.0f}",
+            key=f"inp_volume_finale_{n_reset}",
+        )
+        volume_finale = float(vol_in) if vol_in else float(somma_qta_iniziale)
+
+        cons_in = st.number_input(
+            "🍽️ Quantità consumata ora (ml o g). Lascia vuoto se consumi tutto.",
+            value=None,
+            min_value=0.0,
+            step=10.0,
+            placeholder=f"vuoto = {volume_finale:.0f}",
+            key=f"inp_qta_consumata_{n_reset}",
+        )
+        quantita_consumata = float(cons_in) if cons_in else float(volume_finale)
+
+        totali_ingredienti = {k: 0.0 for k in CHIAVI}
+        db_base = dati_app["database"]
+        for ing, qta in quantita_ingredienti.items():
+            if qta > 0 and ing in db_base:
+                fattore = float(qta) / 100.0
+                for chiave in CHIAVI:
+                    totali_ingredienti[chiave] += float(db_base[ing].get(chiave, 0.0)) * fattore
+
+        if volume_finale > 0 and quantita_consumata > 0:
+            fattore_porzione = float(quantita_consumata) / float(volume_finale)
+            preview_totali = {k: v * fattore_porzione for k, v in totali_ingredienti.items()}
+        else:
+            preview_totali = dict(totali_ingredienti)
+
+        st.markdown("##### 🔍 Anteprima della porzione consumata")
+        a1, a2 = st.columns(2)
+        with a1:
+            st.metric("💧 Liquidi", f"{preview_totali['acqua']:.0f} ml")
+            st.metric("Proteine", f"{preview_totali['prot']:.1f} g")
+            st.metric("Potassio", f"{preview_totali['potassio']:.1f} mg")
+            st.metric("Magnesio", f"{preview_totali['magnesio']:.1f} mg")
+        with a2:
+            st.metric("Calorie", f"{preview_totali['kcal']:.1f} kcal")
+            st.metric("Carboidrati", f"{preview_totali['carb']:.1f} g")
+            st.metric("Calcio", f"{preview_totali['calcio']:.1f} mg")
+            st.metric("Ferro", f"{preview_totali['ferro']:.1f} mg")
+
+    if st.button("🚀 Aggiungi piatto al riepilogo"):
+        ha_quantita = any(q > 0 for q in quantita_ingredienti.values())
+        if nome_piatto.strip() and ha_quantita:
+            registro_utente.setdefault(data_str, {})
+            registro_utente[data_str][nome_piatto.strip()] = {
+                "ingredienti": quantita_ingredienti,
+                "nutrienti": preview_totali,
+                "volume_finale": volume_finale,
+                "quantita_consumata": quantita_consumata,
+            }
+            salva_dati(dati_app)
+            st.session_state["reset_n"] = n_reset + 1
+            st.session_state["msg_piatto"] = (
+                f"Piatto '{nome_piatto.strip()}' aggiunto per"
+                f" {utente_selezionato} nel giorno {data_str}!"
+            )
+            st.rerun()
+        else:
+            st.warning(
+                "Inserisci il nome del piatto e almeno un ingrediente con"
+                " quantità maggiore di 0."
+            )
+
+# ==========================================
+# PAGINA: OGGI (RIEPILOGO GIORNALIERO)
+# ==========================================
+elif pagina == "📊 Oggi":
+    st.subheader("Riepilogo della giornata")
+
+    data_scelta = st.date_input(
+        "Giornata", value=date.today(), key="data_giorno"
     )
-    altezza_val = st.number_input(
-        "Altezza (cm)", step=1.0, key="anag_alt", on_change=aggiorna_valori
+    data_str = str(data_scelta)
+    piatti_oggi = registro_utente.get(data_str, {})
+
+    if not piatti_oggi:
+        st.info("Nessun piatto registrato per questa data.")
+    else:
+        tot_oggi = calcola_totali_giorno(piatti_oggi)
+
+        target_liquidi = obiettivi_utente.get("acqua", 1500.0)
+        liquidi_assunti = tot_oggi.get("acqua", 0.0)
+        diff_liquidi = target_liquidi - liquidi_assunti
+
+        st.markdown("### 💧 Idratazione")
+        if diff_liquidi > 0:
+            st.warning(
+                f"**Assunti:** {liquidi_assunti:.0f} ml su {target_liquidi:.0f} ml"
+                f" — **mancano {diff_liquidi:.0f} ml**"
+            )
+        else:
+            st.success(
+                f"**Assunti:** {liquidi_assunti:.0f} ml su {target_liquidi:.0f} ml"
+                f" — **target raggiunto (+{abs(diff_liquidi):.0f} ml)**"
+            )
+
+        st.markdown("### 📋 Piatti")
+        for nome_p, info in list(piatti_oggi.items()):
+            with st.expander(f"🍽️ {nome_p}"):
+                vol_fin = info.get("volume_finale")
+                qta_cons = info.get("quantita_consumata")
+                if vol_fin and qta_cons:
+                    st.write(f"Volume totale: **{vol_fin:.0f} ml** — porzione consumata: **{qta_cons:.0f} ml**")
+                st.markdown("*Ingredienti:*")
+                for ing, qta in info.get("ingredienti", {}).items():
+                    if qta > 0:
+                        st.write(f"- {ing}: {qta:g} g/ml")
+                n = info.get("nutrienti", {})
+                st.markdown("*Nutrienti assunti:*")
+                st.write(f"- Liquidi: {n.get('acqua', 0):.0f} ml")
+                st.write(f"- Calorie: {n.get('kcal', 0):.1f} kcal")
+                st.write(f"- Proteine: {n.get('prot', 0):.1f} g")
+                st.write(f"- Carboidrati: {n.get('carb', 0):.1f} g")
+                st.write(f"- Grassi: {n.get('grassi', 0):.1f} g")
+                st.write(f"- Potassio: {n.get('potassio', 0):.1f} mg")
+                st.write(f"- Calcio: {n.get('calcio', 0):.1f} mg")
+                st.write(f"- Magnesio: {n.get('magnesio', 0):.1f} mg")
+                st.write(f"- Ferro: {n.get('ferro', 0):.1f} mg")
+                if st.button(
+                    f"🗑️ Rimuovi '{nome_p}'",
+                    key=f"del_{utente_selezionato}_{data_str}_{nome_p}",
+                ):
+                    del registro_utente[data_str][nome_p]
+                    salva_dati(dati_app)
+                    st.rerun()
+
+        st.markdown("### 🎯 Confronto con gli obiettivi")
+
+        def mostra_confronto(nome_nutriente, unita, chiave):
+            assunto = tot_oggi[chiave]
+            target = obiettivi_utente.get(chiave, DEFAULT_OBIETTIVI[chiave])
+            differenza = target - assunto
+            if differenza > 0:
+                st.warning(
+                    f"**{nome_nutriente}**: {assunto:.1f} / {target:.1f} {unita}"
+                    f" — mancano {differenza:.1f} {unita}"
+                )
+            else:
+                st.success(
+                    f"**{nome_nutriente}**: {assunto:.1f} / {target:.1f} {unita}"
+                    f" — raggiunto (+{abs(differenza):.1f} {unita})"
+                )
+
+        with st.expander("Macronutrienti e liquidi", expanded=True):
+            mostra_confronto("Liquidi", "ml", "acqua")
+            mostra_confronto("Calorie", "kcal", "kcal")
+            mostra_confronto("Proteine", "g", "prot")
+            mostra_confronto("Carboidrati", "g", "carb")
+            mostra_confronto("Grassi", "g", "grassi")
+            mostra_confronto("Fibre", "g", "fibre")
+        with st.expander("Minerali"):
+            mostra_confronto("Potassio", "mg", "potassio")
+            mostra_confronto("Calcio", "mg", "calcio")
+            mostra_confronto("Magnesio", "mg", "magnesio")
+            mostra_confronto("Ferro", "mg", "ferro")
+            mostra_confronto("Fosforo", "mg", "fosforo")
+            mostra_confronto("Sodio", "mg", "sodio")
+        with st.expander("Oligoelementi e vitamine"):
+            mostra_confronto("Zinco", "mg", "zinco")
+            mostra_confronto("Manganese", "mg", "manganese")
+            mostra_confronto("Silicio", "mg", "silicio")
+            mostra_confronto("Vit. C", "mg", "vit_c")
+            mostra_confronto("Vit. A", "mcg", "vit_a")
+            mostra_confronto("Vit. B6", "mg", "vit_b6")
+
+# ==========================================
+# PAGINA: VITALI
+# ==========================================
+elif pagina == "🩺 Vitali":
+    st.subheader("Parametri vitali")
+
+    data_v = st.date_input("Giornata", value=date.today(), key="data_vitali")
+    data_v_str = str(data_v)
+    vit_giorno = parametri_vitali_utente.get(data_v_str, {})
+
+    chiave_vit = f"{utente_selezionato}|{data_v_str}"
+    if st.session_state.get("chiave_vit_caricata") != chiave_vit or "p_sys_m" not in st.session_state:
+        st.session_state["chiave_vit_caricata"] = chiave_vit
+        st.session_state["p_sys_m"] = int(vit_giorno.get("press_sys_m", 0))
+        st.session_state["p_dia_m"] = int(vit_giorno.get("press_dia_m", 0))
+        st.session_state["p_puls_m"] = int(vit_giorno.get("puls_m", 0))
+        st.session_state["p_sys_s"] = int(vit_giorno.get("press_sys_s", 0))
+        st.session_state["p_dia_s"] = int(vit_giorno.get("press_dia_s", 0))
+        st.session_state["p_puls_s"] = int(vit_giorno.get("puls_s", 0))
+        st.session_state["sat_val"] = int(vit_giorno.get("saturazione", 0))
+
+    st.markdown("**🔴 Pressione mattina**")
+    p_sys_m = st.number_input("Sistolica / Max (mmHg)", min_value=0, step=1, key="p_sys_m")
+    p_dia_m = st.number_input("Diastolica / Min (mmHg)", min_value=0, step=1, key="p_dia_m")
+    p_puls_m = st.number_input("Pulsazioni (BPM)", min_value=0, step=1, key="p_puls_m")
+
+    st.markdown("**🌙 Pressione sera**")
+    p_sys_s = st.number_input("Sistolica / Max (mmHg) ", min_value=0, step=1, key="p_sys_s")
+    p_dia_s = st.number_input("Diastolica / Min (mmHg) ", min_value=0, step=1, key="p_dia_s")
+    p_puls_s = st.number_input("Pulsazioni (BPM) ", min_value=0, step=1, key="p_puls_s")
+
+    st.markdown("**🫁 Saturazione ossigeno**")
+    sat_val = st.number_input(
+        "Saturazione (% SpO2)", min_value=0, max_value=100, step=1, key="sat_val"
     )
-    peso_val = st.number_input(
-        "Peso (kg)", step=0.5, key="anag_peso", on_change=aggiorna_valori
-    )
-    mobilita_val = st.selectbox(
-        "Stile di vita / Mobilità",
-        MOBILITA_OPZIONI,
-        key="anag_mob",
-        on_change=aggiorna_valori,
-    )
-    st.checkbox(
-        "🔄 Ricalcolo automatico", key="anag_ricalc", on_change=aggiorna_valori
-    )
+
+    if st.button("💾 Salva parametri vitali"):
+        parametri_vitali_utente[data_v_str] = {
+            "press_sys_m": p_sys_m,
+            "press_dia_m": p_dia_m,
+            "puls_m": p_puls_m,
+            "press_sys_s": p_sys_s,
+            "press_dia_s": p_dia_s,
+            "puls_s": p_puls_s,
+            "saturazione": sat_val,
+        }
+        salva_dati(dati_app)
+        st.success("Parametri vitali salvati!")
+
+    if data_v_str in parametri_vitali_utente:
+        v = parametri_vitali_utente[data_v_str]
+        st.markdown("---")
+        st.markdown(f"**Salvati per il {data_v_str}:**")
+        sm, dm, pm = v.get("press_sys_m", 0), v.get("press_dia_m", 0), v.get("puls_m", 0)
+        ss, ds, ps = v.get("press_sys_s", 0), v.get("press_dia_s", 0), v.get("puls_s", 0)
+        sat = v.get("saturazione", 0)
+        st.metric("Pressione mattina", f"{sm}/{dm} mmHg" if sm > 0 and dm > 0 else "Non registrata", f"{pm} BPM" if pm > 0 else "")
+        st.metric("Pressione sera", f"{ss}/{ds} mmHg" if ss > 0 and ds > 0 else "Non registrata", f"{ps} BPM" if ps > 0 else "")
+        st.metric("Saturazione SpO2", f"{sat}%" if sat > 0 else "Non registrata")
+        if 0 < sat < 95:
+            st.error("⚠️ Attenzione: saturazione sotto il 95%")
+
+# ==========================================
+# PAGINA: MEDIE
+# ==========================================
+elif pagina == "📈 Medie":
+    st.subheader("Trend e medie")
+
+    def calcola_media_periodo(giorni_indietro):
+        somma_tot = {k: 0.0 for k in CHIAVI}
+        giorni_validi = 0
+        oggi = date.today()
+        for i in range(giorni_indietro):
+            d_str = str(oggi - timedelta(days=i))
+            if registro_utente.get(d_str):
+                res_g = calcola_totali_giorno(registro_utente[d_str])
+                for k in CHIAVI:
+                    somma_tot[k] += res_g[k]
+                giorni_validi += 1
+        if giorni_validi > 0:
+            return {k: v / giorni_validi for k, v in somma_tot.items()}, giorni_validi
+        return None, 0
+
+    for giorni in (7, 30):
+        media, conteggio = calcola_media_periodo(giorni)
+        st.markdown(f"**Media {giorni} giorni** ({conteggio} giorni registrati)")
+        if media:
+            st.write(f"- Liquidi medi: **{media['acqua']:.0f} ml**")
+            st.write(f"- Calorie medie: **{media['kcal']:.1f} kcal**")
+            st.write(f"- Proteine medie: **{media['prot']:.1f} g**")
+            st.write(f"- Potassio medio: **{media['potassio']:.1f} mg**")
+        else:
+            st.write(f"Dati insufficienti negli ultimi {giorni} giorni.")
+        st.markdown("---")
+
+# ==========================================
+# PAGINA: ALIMENTI (DATABASE INGREDIENTI)
+# ==========================================
+elif pagina == "🥕 Alimenti":
+    st.subheader("Database alimenti (condiviso)")
+
+    if "msg_ing" in st.session_state:
+        st.success(st.session_state.pop("msg_ing"))
+
+    with st.expander("🔍 Elenco alimenti in ordine alfabetico"):
+        for nome in ingredienti_ordinati:
+            st.write(f"- {nome}")
+
+    st.markdown("**Aggiungi un nuovo alimento** (valori per 100 g)")
+    with st.form("form_ingrediente", clear_on_submit=True):
+        nome_ing = st.text_input("Nome alimento")
+        valori_ing = {}
+        for chiave, etichetta, passo in CAMPI_INGREDIENTE:
+            val = st.number_input(
+                etichetta,
+                value=None,
+                min_value=0.0,
+                step=passo,
+                placeholder="0",
+                key=f"ing_{chiave}",
+            )
+            valori_ing[chiave] = float(val) if val else 0.0
+        invia_ing = st.form_submit_button("💾 Salva alimento")
+
+    if invia_ing:
+        if nome_ing.strip():
+            dati_app["database"][nome_ing.strip()] = valori_ing
+            salva_dati(dati_app)
+            st.session_state["msg_ing"] = f"Alimento '{nome_ing.strip()}' salvato!"
+            st.rerun()
+        else:
+            st.warning("Inserisci il nome dell'alimento.")
+
+# ==========================================
+# PAGINA: PROFILO
+# ==========================================
+elif pagina == "👤 Profilo":
+    st.subheader(f"Profilo e target [{utente_selezionato}]")
+
+    # Carico i widget con i dati del profilo (le chiavi si cancellano quando
+    # si cambia pagina, quindi le ricreo ogni volta che entro qui)
+    if st.session_state.get("profilo_caricato") != utente_selezionato or "anag_eta" not in st.session_state:
+        st.session_state["anag_sesso"] = anagrafica_utente.get("sesso", "Donna")
+        st.session_state["anag_eta"] = int(anagrafica_utente.get("eta", 92))
+        st.session_state["anag_alt"] = float(anagrafica_utente.get("altezza", 150.0))
+        st.session_state["anag_peso"] = float(anagrafica_utente.get("peso", 55.0))
+        mob = anagrafica_utente.get("mobilita", MOBILITA_OPZIONI[0])
+        st.session_state["anag_mob"] = mob if mob in MOBILITA_OPZIONI else MOBILITA_OPZIONI[0]
+        st.session_state["anag_ricalc"] = True
+        for chiave, default in DEFAULT_OBIETTIVI.items():
+            st.session_state[f"t_{chiave}"] = float(obiettivi_utente.get(chiave, default))
+        st.session_state["profilo_caricato"] = utente_selezionato
+
+    def aggiorna_valori():
+        if not st.session_state.get("anag_ricalc", True):
+            return
+        targ = calcola_target_automatici(
+            st.session_state["anag_sesso"],
+            int(st.session_state["anag_eta"]),
+            float(st.session_state["anag_alt"]),
+            float(st.session_state["anag_peso"]),
+            st.session_state["anag_mob"],
+        )
+        for chiave, valore in targ.items():
+            st.session_state[f"t_{chiave}"] = valore
+
+    st.markdown("**Dati anagrafici**")
+    sesso_val = st.selectbox("Sesso", ["Donna", "Uomo"], key="anag_sesso", on_change=aggiorna_valori)
+    eta_val = st.number_input("Età (anni)", step=1, key="anag_eta", on_change=aggiorna_valori)
+    altezza_val = st.number_input("Altezza (cm)", step=1.0, key="anag_alt", on_change=aggiorna_valori)
+    peso_val = st.number_input("Peso (kg)", step=0.5, key="anag_peso", on_change=aggiorna_valori)
+    mobilita_val = st.selectbox("Stile di vita / Mobilità", MOBILITA_OPZIONI, key="anag_mob", on_change=aggiorna_valori)
+    st.checkbox("🔄 Ricalcolo automatico dei target", key="anag_ricalc", on_change=aggiorna_valori)
 
     st.markdown("---")
-    st.markdown("**Target Idrico e Mantenimento:**")
+    st.markdown("**Target giornalieri**")
     target_nuovi = {}
     for chiave, etichetta, passo in CAMPI_PRINCIPALI:
-        target_nuovi[chiave] = st.number_input(
-            etichetta, step=passo, key=f"t_{chiave}"
-        )
+        target_nuovi[chiave] = st.number_input(etichetta, step=passo, key=f"t_{chiave}")
 
-    st.markdown("**Minerali e Vitamine:**")
-    for chiave, etichetta, passo in CAMPI_TARGET:
-        target_nuovi[chiave] = st.number_input(
-            etichetta, step=passo, key=f"t_{chiave}"
-        )
+    with st.expander("Minerali e vitamine"):
+        for chiave, etichetta, passo in CAMPI_TARGET:
+            target_nuovi[chiave] = st.number_input(etichetta, step=passo, key=f"t_{chiave}")
 
-    if st.button("💾 Salva Profilo"):
+    if st.button("💾 Salva profilo"):
         dati_utente["anagrafica"] = {
             "sesso": sesso_val,
             "eta": int(eta_val),
@@ -312,436 +689,23 @@ with st.sidebar.expander(
             **{k: float(v) for k, v in target_nuovi.items()},
         }
         salva_dati(dati_app)
-        st.sidebar.success("Profilo salvato!")
-        st.rerun()
+        st.success("Profilo salvato!")
 
-st.info(f"Profilo attivo: **{utente_selezionato}**")
-
-ingredienti_ordinati = sorted(dati_app["database"].keys())
-
-# ==========================================
-# SEZIONE 1: AGGIUNGI INGREDIENTE BASE
-# ==========================================
-st.subheader("1. Database Ingredienti Base (Condiviso)")
-
-with st.expander("🔍 Mostra l'elenco completo degli alimenti in ordine alfabetico"):
-    st.write(ingredienti_ordinati)
-
-with st.form("form_ingrediente"):
-    st.markdown("**Aggiungi un nuovo ingrediente personalizzato:**")
-    nome_ing = st.text_input("Nome Ingrediente / Alimento")
-
-    col1, col2, col3 = st.columns(3)
-    with col1:
-        st.markdown("**Macronutrienti, Acqua & Fibre**")
-        c_kcal = st.number_input("Calorie (kcal)", value=0.0, step=0.1)
-        c_prot = st.number_input("Proteine (g)", value=0.0, step=0.1)
-        c_carb = st.number_input("Carboidrati Totali (g)", value=0.0, step=0.1)
-        c_zuccheri = st.number_input("di cui Zuccheri (g)", value=0.0, step=0.1)
-        c_grassi = st.number_input("Grassi (g)", value=0.0, step=0.1)
-        c_fibre = st.number_input("Fibre (g)", value=0.0, step=0.1)
-        c_acqua = st.number_input("Acqua / Liquidi (ml per 100g)", value=0.0, step=1.0)
-    with col2:
-        st.markdown("**Minerali & Oligoelementi (mg)**")
-        c_sodio = st.number_input("Sodio (mg)", value=0.0, step=0.1)
-        c_potassio = st.number_input("Potassio (mg)", value=0.0, step=0.1)
-        c_calcio = st.number_input("Calcio (mg)", value=0.0, step=0.1)
-        c_magnesio = st.number_input("Magnesio (mg)", value=0.0, step=0.1)
-        c_ferro = st.number_input("Ferro (mg)", value=0.0, step=0.1)
-        c_fosforo = st.number_input("Fosforo (mg)", value=0.0, step=0.1)
-        c_zinco = st.number_input("Zinco (mg)", value=0.0, step=0.01)
-        c_manganese = st.number_input("Manganese (mg)", value=0.0, step=0.01)
-        c_silicio = st.number_input("Silicio (mg)", value=0.0, step=0.1)
-    with col3:
-        st.markdown("**Vitamine Principali**")
-        c_vit_c = st.number_input("Vit. C (mg)", value=0.0, step=0.1)
-        c_vit_a = st.number_input("Vit. A (mcg)", value=0.0, step=0.1)
-        c_vit_b6 = st.number_input("Vit. B6 (mg)", value=0.0, step=0.01)
-
-    if st.form_submit_button("💾 Salva Nuovo Ingrediente nel Database"):
-        if nome_ing.strip():
-            dati_app["database"][nome_ing.strip()] = {
-                "kcal": c_kcal, "prot": c_prot, "carb": c_carb,
-                "zuccheri": c_zuccheri, "grassi": c_grassi, "fibre": c_fibre,
-                "acqua": c_acqua, "sodio": c_sodio, "potassio": c_potassio,
-                "calcio": c_calcio, "magnesio": c_magnesio, "ferro": c_ferro,
-                "vit_c": c_vit_c, "vit_a": c_vit_a, "vit_b6": c_vit_b6,
-                "fosforo": c_fosforo, "zinco": c_zinco,
-                "manganese": c_manganese, "silicio": c_silicio,
-            }
+    st.markdown("---")
+    st.markdown("**Nuovo profilo**")
+    nuovo_nome_utente = st.text_input("Nome del nuovo profilo", key="txt_nuovo_profilo")
+    if st.button("➕ Crea profilo"):
+        nome = nuovo_nome_utente.strip()
+        if nome and nome not in dati_app["utenti"]:
+            dati_app["utenti"][nome] = nuovo_utente()
             salva_dati(dati_app)
-            st.success(f"Ingrediente '{nome_ing}' salvato!")
-            st.rerun()
+            st.success(f"Profilo '{nome}' creato! Selezionalo in alto.")
         else:
-            st.warning("Inserisci il nome dell'ingrediente.")
-
-st.divider()
-
-# ==========================================
-# SEZIONE 2: COMPONI PIATTO / PASTO
-# ==========================================
-st.subheader(f"2. 🍳 Componi Piatto / Pasto per [{utente_selezionato}]")
-
-# Il contatore cambia ad ogni salvataggio: i campi si azzerano da soli
-n_reset = st.session_state.get("reset_n", 0)
-
-nome_piatto = st.text_input(
-    "Nome del Piatto / Preparazione (es. Brodo Vegetale)",
-    key=f"inp_nome_piatto_{n_reset}",
-)
-data_piatto = st.date_input(
-    "Seleziona la Data in cui consumi questo piatto",
-    value=date.today(),
-    key="inp_data_piatto",
-)
-data_str = str(data_piatto)
-
-selected_ingredients = st.multiselect(
-    "Seleziona gli ingredienti che compongono il piatto",
-    ingredienti_ordinati,
-    key=f"sel_ing_piatto_{n_reset}",
-)
-quantita_ingredienti = {}
-volume_finale = 0.0
-quantita_consumata = 0.0
-preview_totali = {k: 0.0 for k in CHIAVI}
-
-if selected_ingredients:
-    st.markdown("##### ⚖️ Specifica le quantità iniziali per ogni ingrediente:")
-    for ing in selected_ingredients:
-        q = st.number_input(
-            f"Quantità usata di '{ing}' (g o ml)",
-            value=None,
-            min_value=0.0,
-            step=1.0,
-            placeholder="0",
-            key=f"qty_piatto_{ing}_{n_reset}",
-        )
-        quantita_ingredienti[ing] = float(q) if q else 0.0
-
-    somma_qta_iniziale = sum(quantita_ingredienti.values())
+            st.warning("Inserisci un nome non ancora usato.")
 
     st.markdown("---")
-
-    vol_in = st.number_input(
-        "💧 Volume totale dopo la cottura (ml) [lascia vuoto se è uguale alla"
-        " somma degli ingredienti; es. parti da 1500 e arrivi a 700, scrivi 700]",
-        value=None,
-        min_value=0.0,
-        step=10.0,
-        placeholder=f"vuoto = {somma_qta_iniziale:.0f}",
-        key=f"inp_volume_finale_{n_reset}",
+    auto = st.toggle(
+        "🔄 Aggiornamento automatico ogni 30 s (solo nelle pagine Oggi e Medie)",
+        value=st.session_state.get("auto_ref", False),
     )
-    volume_finale = float(vol_in) if vol_in else float(somma_qta_iniziale)
-
-    cons_in = st.number_input(
-        "🍽️ Quantità consumata in questo pasto (ml o g) [lascia vuoto se"
-        " consumi tutto]",
-        value=None,
-        min_value=0.0,
-        step=10.0,
-        placeholder=f"vuoto = {volume_finale:.0f}",
-        key=f"inp_qta_consumata_{n_reset}",
-    )
-    quantita_consumata = float(cons_in) if cons_in else float(volume_finale)
-
-    totali_ingredienti = {k: 0.0 for k in CHIAVI}
-    db_base = dati_app["database"]
-    for ing, qta in quantita_ingredienti.items():
-        if qta > 0 and ing in db_base:
-            fattore = float(qta) / 100.0
-            for chiave in CHIAVI:
-                totali_ingredienti[chiave] += float(db_base[ing].get(chiave, 0.0)) * fattore
-
-    if volume_finale > 0 and quantita_consumata > 0:
-        fattore_porzione = float(quantita_consumata) / float(volume_finale)
-        preview_totali = {k: v * fattore_porzione for k, v in totali_ingredienti.items()}
-    else:
-        preview_totali = dict(totali_ingredienti)
-
-    st.markdown("---")
-    st.markdown("##### 🔍 **Anteprima Valori Nutrizionali per la Porzione Consumata:**")
-    p1, p2, p3, p4 = st.columns(4)
-    with p1:
-        st.metric("💧 Liquidi Porzione", f"{preview_totali['acqua']:.0f} ml")
-        st.metric("Calorie", f"{preview_totali['kcal']:.1f} kcal")
-    with p2:
-        st.metric("Proteine", f"{preview_totali['prot']:.1f} g")
-        st.metric("Carboidrati", f"{preview_totali['carb']:.1f} g")
-    with p3:
-        st.metric("Potassio", f"{preview_totali['potassio']:.1f} mg")
-        st.metric("Calcio", f"{preview_totali['calcio']:.1f} mg")
-    with p4:
-        st.metric("Magnesio", f"{preview_totali['magnesio']:.1f} mg")
-        st.metric("Ferro", f"{preview_totali['ferro']:.1f} mg")
-    st.markdown("---")
-
-if st.button("🚀 Calcola e Aggiungi Piatto al Riepilogo Giornaliero"):
-    ha_quantita = any(q > 0 for q in quantita_ingredienti.values())
-    if nome_piatto.strip() and ha_quantita:
-        registro_utente.setdefault(data_str, {})
-        registro_utente[data_str][nome_piatto.strip()] = {
-            "ingredienti": quantita_ingredienti,
-            "nutrienti": preview_totali,
-            "volume_finale": volume_finale,
-            "quantita_consumata": quantita_consumata,
-        }
-        salva_dati(dati_app)
-        st.session_state["reset_n"] = n_reset + 1
-        st.session_state["msg_piatto"] = (
-            f"Piatto '{nome_piatto.strip()}' aggiunto per {utente_selezionato}"
-            f" nel giorno {data_str}!"
-        )
-        st.rerun()
-    else:
-        st.warning(
-            "Inserisci il nome del piatto e almeno un ingrediente con quantità"
-            " maggiore di 0."
-        )
-
-if "msg_piatto" in st.session_state:
-    st.success(st.session_state.pop("msg_piatto"))
-# ==========================================
-# SEZIONE 3: RIEPILOGO, PARAMETRI VITALI E TARGET
-# ==========================================
-st.subheader(f"3. 📊 Dashboard di Riepilogo e Controllo Target [{utente_selezionato}]")
-
-data_scelta_storico = st.date_input(
-    "Visualizza Giornata", value=date.today(), key="storico_data"
-)
-data_storico_str = str(data_scelta_storico)
-
-vit_giorno = parametri_vitali_utente.get(data_storico_str, {})
-chiave_vit = f"{utente_selezionato}|{data_storico_str}"
-if st.session_state.get("ultima_chiave_vit") != chiave_vit:
-    st.session_state["ultima_chiave_vit"] = chiave_vit
-    st.session_state["p_sys_m"] = int(vit_giorno.get("press_sys_m", 0))
-    st.session_state["p_dia_m"] = int(vit_giorno.get("press_dia_m", 0))
-    st.session_state["p_puls_m"] = int(vit_giorno.get("puls_m", 0))
-    st.session_state["p_sys_s"] = int(vit_giorno.get("press_sys_s", 0))
-    st.session_state["p_dia_s"] = int(vit_giorno.get("press_dia_s", 0))
-    st.session_state["p_puls_s"] = int(vit_giorno.get("puls_s", 0))
-    st.session_state["sat_val"] = int(vit_giorno.get("saturazione", 0))
-
-st.markdown("### 🩺 Parametri Vitali della Giornata")
-
-with st.expander(
-    f"📝 Inserisci / Modifica Parametri Vitali del {data_storico_str}", expanded=True
-):
-    cp1, cp2, cp3 = st.columns(3)
-    with cp1:
-        st.markdown("**🔴 Pressione Mattina**")
-        p_sys_m = st.number_input("Sistolica / Max (mmHg)", min_value=0, step=1, key="p_sys_m")
-        p_dia_m = st.number_input("Diastolica / Min (mmHg)", min_value=0, step=1, key="p_dia_m")
-        p_puls_m = st.number_input("Pulsazioni (BPM)", min_value=0, step=1, key="p_puls_m")
-    with cp2:
-        st.markdown("**🌙 Pressione Sera**")
-        p_sys_s = st.number_input("Sistolica / Max (mmHg) ", min_value=0, step=1, key="p_sys_s")
-        p_dia_s = st.number_input("Diastolica / Min (mmHg) ", min_value=0, step=1, key="p_dia_s")
-        p_puls_s = st.number_input("Pulsazioni (BPM) ", min_value=0, step=1, key="p_puls_s")
-    with cp3:
-        st.markdown("**🫁 Saturazione Ossigeno**")
-        sat_val = st.number_input(
-            "Saturazione (% SpO2)", min_value=0, max_value=100, step=1, key="sat_val"
-        )
-
-    if st.button("💾 Salva Parametri Vitali"):
-        parametri_vitali_utente[data_storico_str] = {
-            "press_sys_m": p_sys_m,
-            "press_dia_m": p_dia_m,
-            "puls_m": p_puls_m,
-            "press_sys_s": p_sys_s,
-            "press_dia_s": p_dia_s,
-            "puls_s": p_puls_s,
-            "saturazione": sat_val,
-        }
-        salva_dati(dati_app)
-        st.success("Parametri vitali salvati con successo!")
-        st.rerun()
-
-if data_storico_str in parametri_vitali_utente:
-    v_dat = parametri_vitali_utente[data_storico_str]
-    m1, m2, m3 = st.columns(3)
-    with m1:
-        sys_m, dia_m, puls_m = v_dat.get("press_sys_m", 0), v_dat.get("press_dia_m", 0), v_dat.get("puls_m", 0)
-        p_m_str = f"{sys_m}/{dia_m} mmHg" if sys_m > 0 and dia_m > 0 else "Non registrata"
-        st.metric("Pressione Mattina", p_m_str, f"{puls_m} BPM" if puls_m > 0 else "")
-    with m2:
-        sys_s, dia_s, puls_s = v_dat.get("press_sys_s", 0), v_dat.get("press_dia_s", 0), v_dat.get("puls_s", 0)
-        p_s_str = f"{sys_s}/{dia_s} mmHg" if sys_s > 0 and dia_s > 0 else "Non registrata"
-        st.metric("Pressione Sera", p_s_str, f"{puls_s} BPM" if puls_s > 0 else "")
-    with m3:
-        sat_curr = v_dat.get("saturazione", 0)
-        if sat_curr > 0:
-            st.metric("Saturazione SpO2", f"{sat_curr}%")
-            if sat_curr < 95:
-                st.error("⚠️ Attenzione: Saturazione sotto il 95%")
-        else:
-            st.metric("Saturazione SpO2", "Non registrata")
-
-st.markdown("---")
-
-
-def calcola_totali_giorno(piatti_giorno):
-    totali = {k: 0.0 for k in CHIAVI}
-    for info in piatti_giorno.values():
-        nutrienti = info.get("nutrienti", {})
-        for chiave in CHIAVI:
-            totali[chiave] += float(nutrienti.get(chiave, 0.0))
-    return totali
-
-
-piatti_oggi = registro_utente.get(data_storico_str, {})
-
-if piatti_oggi:
-    tot_oggi = calcola_totali_giorno(piatti_oggi)
-
-    target_liquidi = obiettivi_utente.get("acqua", 1500.0)
-    liquidi_assunti = tot_oggi.get("acqua", 0.0)
-    diff_liquidi = target_liquidi - liquidi_assunti
-
-    st.markdown("### 💧 Monitoraggio Idratazione Giornaliera")
-    if diff_liquidi > 0:
-        st.warning(
-            f"**Liquidi Assunti:** {liquidi_assunti:.0f} ml / **Target:**"
-            f" {target_liquidi:.0f} ml — **Mancano {diff_liquidi:.0f} ml**"
-        )
-    else:
-        st.success(
-            f"**Liquidi Assunti:** {liquidi_assunti:.0f} ml / **Target:**"
-            f" {target_liquidi:.0f} ml — **Target Idrico Raggiunto!"
-            f" (+{abs(diff_liquidi):.0f} ml)**"
-        )
-
-    st.markdown("---")
-    st.markdown(f"### 📋 Dettaglio Piatti e Ingredienti del {data_storico_str}")
-
-    for nome_p, info in list(piatti_oggi.items()):
-        st.markdown(f"**🍽️ Piatto: {nome_p}**")
-        vol_fin = info.get("volume_finale")
-        qta_cons = info.get("quantita_consumata")
-        if vol_fin and qta_cons:
-            st.markdown(
-                f"- *Volume totale pentola:* **{vol_fin} ml** | *Porzione"
-                f" consumata:* **{qta_cons} ml**"
-            )
-
-        st.markdown("*Ingredienti utilizzati (ricetta di base):*")
-        for ing, qta in info.get("ingredienti", {}).items():
-            if qta > 0:
-                st.markdown(f"   - **{ing}**: {qta} g/ml")
-
-        n = info.get("nutrienti", {})
-        with st.expander(f"🔍 Dettaglio nutrienti assunti per '{nome_p}'"):
-            d1, d2, d3 = st.columns(3)
-            with d1:
-                st.write(f"- Liquidi: {n.get('acqua', 0):.0f} ml")
-                st.write(f"- Calorie: {n.get('kcal', 0):.1f} kcal")
-                st.write(f"- Proteine: {n.get('prot', 0):.1f} g")
-            with d2:
-                st.write(f"- Carboidrati: {n.get('carb', 0):.1f} g")
-                st.write(f"- Potassio: {n.get('potassio', 0):.1f} mg")
-                st.write(f"- Calcio: {n.get('calcio', 0):.1f} mg")
-            with d3:
-                st.write(f"- Grassi: {n.get('grassi', 0):.1f} g")
-                st.write(f"- Ferro: {n.get('ferro', 0):.1f} mg")
-                st.write(f"- Magnesio: {n.get('magnesio', 0):.1f} mg")
-
-        if st.button(
-            f"🗑️ Rimuovi '{nome_p}'",
-            key=f"del_{utente_selezionato}_{data_storico_str}_{nome_p}",
-        ):
-            del registro_utente[data_storico_str][nome_p]
-            salva_dati(dati_app)
-            st.rerun()
-        st.markdown("---")
-
-    st.markdown(
-        "**Confronto Totale Giornaliero con gli Obiettivi di Mantenimento"
-        f" ({data_storico_str}):**"
-    )
-
-    def mostra_confronto(nome_nutriente, unita, chiave_diz):
-        assunto = tot_oggi[chiave_diz]
-        target = obiettivi_utente.get(chiave_diz, DEFAULT_OBIETTIVI[chiave_diz])
-        differenza = target - assunto
-        if differenza > 0:
-            st.warning(
-                f"**{nome_nutriente}**: Assunti {assunto:.1f} {unita} / Target"
-                f" {target:.1f} {unita} — **Mancano {differenza:.1f} {unita}**"
-            )
-        else:
-            st.success(
-                f"**{nome_nutriente}**: Assunti {assunto:.1f} {unita} / Target"
-                f" {target:.1f} {unita} — **Target Raggiunto"
-                f" (+{abs(differenza):.1f} {unita})**"
-            )
-
-    cc1, cc2, cc3 = st.columns(3)
-    with cc1:
-        st.markdown("**Macronutrienti & Liquidi**")
-        mostra_confronto("Liquidi/Acqua", "ml", "acqua")
-        mostra_confronto("Calorie", "kcal", "kcal")
-        mostra_confronto("Proteine", "g", "prot")
-        mostra_confronto("Carboidrati", "g", "carb")
-        mostra_confronto("Grassi", "g", "grassi")
-        mostra_confronto("Fibre", "g", "fibre")
-    with cc2:
-        st.markdown("**Minerali Principali**")
-        mostra_confronto("Potassio", "mg", "potassio")
-        mostra_confronto("Calcio", "mg", "calcio")
-        mostra_confronto("Magnesio", "mg", "magnesio")
-        mostra_confronto("Ferro", "mg", "ferro")
-        mostra_confronto("Fosforo", "mg", "fosforo")
-        mostra_confronto("Sodio", "mg", "sodio")
-    with cc3:
-        st.markdown("**Oligoelementi & Vitamine**")
-        mostra_confronto("Zinco", "mg", "zinco")
-        mostra_confronto("Manganese", "mg", "manganese")
-        mostra_confronto("Silicio", "mg", "silicio")
-        mostra_confronto("Vit. C", "mg", "vit_c")
-        mostra_confronto("Vit. A", "mcg", "vit_a")
-        mostra_confronto("Vit. B6", "mg", "vit_b6")
-else:
-    st.info("Nessun piatto registrato per questa data.")
-
-# ==========================================
-# TREND E MEDIE
-# ==========================================
-st.markdown("---")
-st.subheader(f"📈 Trend e Medie [{utente_selezionato}] (Ultimi 7 e 30 Giorni)")
-
-
-def calcola_media_periodo(giorni_indietro):
-    somma_tot = {k: 0.0 for k in CHIAVI}
-    giorni_validi = 0
-    oggi = date.today()
-    for i in range(giorni_indietro):
-        d_str = str(oggi - timedelta(days=i))
-        if registro_utente.get(d_str):
-            res_g = calcola_totali_giorno(registro_utente[d_str])
-            for k in CHIAVI:
-                somma_tot[k] += res_g[k]
-            giorni_validi += 1
-    if giorni_validi > 0:
-        return {k: v / giorni_validi for k, v in somma_tot.items()}, giorni_validi
-    return None, 0
-
-
-media_7g, count_7g = calcola_media_periodo(7)
-media_30g, count_30g = calcola_media_periodo(30)
-
-ct1, ct2 = st.columns(2)
-for colonna, media, conteggio, giorni in (
-    (ct1, media_7g, count_7g, 7),
-    (ct2, media_30g, count_30g, 30),
-):
-    with colonna:
-        st.markdown(f"**Media {giorni} giorni ({conteggio} giorni registrati):**")
-        if media:
-            st.write(f"- Liquidi medi: **{media['acqua']:.0f} ml**")
-            st.write(f"- Calorie medie: **{media['kcal']:.1f} kcal**")
-            st.write(f"- Proteine medie: **{media['prot']:.1f} g**")
-            st.write(f"- Potassio medio: **{media['potassio']:.1f} mg**")
-        else:
-            st.write(f"Dati insufficienti negli ultimi {giorni} giorni.")
+    st.session_state["auto_ref"] = auto

@@ -204,13 +204,13 @@ def carica_dati():
         }
 
     dati = json.loads(testo)
-    dati.setdefault("database", {})
     dati.setdefault("ricette", {})
-    dati.setdefault("utenti", {"Anna": nuovo_utente()})
-
-    for nome, valori in DATABASE_INIZIALE.items():
-        if nome not in dati["database"]:
-            dati["database"][nome] = dict(valori)
+    # Il database alimenti parte da quello iniziale; poi si modifica solo
+    # dall'app (così un alimento eliminato non ricompare)
+    if not dati.get("database"):
+        dati["database"] = {k: dict(v) for k, v in DATABASE_INIZIALE.items()}
+    if not dati.get("utenti"):
+        dati["utenti"] = {"Anna": nuovo_utente()}
 
     for u in dati["utenti"].values():
         u.setdefault("registro", {})
@@ -296,6 +296,7 @@ def genera_csv_vitali(vitali, d_da, d_a):
     w.writerow([
         "Data", "Sistolica mattina", "Diastolica mattina", "Pulsazioni mattina",
         "Sistolica sera", "Diastolica sera", "Pulsazioni sera", "Saturazione SpO2 (%)",
+        "Temperatura (°C)", "Evacuazioni (n.)", "Note evacuazione",
     ])
     for g in giorni_periodo(d_da, d_a):
         v = vitali.get(str(g))
@@ -304,6 +305,8 @@ def genera_csv_vitali(vitali, d_da, d_a):
                 it_data(g), v.get("press_sys_m", 0), v.get("press_dia_m", 0),
                 v.get("puls_m", 0), v.get("press_sys_s", 0),
                 v.get("press_dia_s", 0), v.get("puls_s", 0), v.get("saturazione", 0),
+                num_it(v["temperatura"]) if v.get("temperatura") else "",
+                v.get("evacuazioni", ""), v.get("evacuazione_note", ""),
             ])
     return out.getvalue().encode("utf-8-sig")
 
@@ -385,11 +388,14 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
 
     # --- Parametri vitali ---
     el.append(Paragraph("Parametri vitali", sezione))
-    righe = [["Data", "Pressione mattina", "Polso", "Pressione sera", "Polso", "SpO2"]]
+    righe = [["Data", "Press. mattina", "Polso", "Press. sera", "Polso", "SpO2", "Temp.", "Evac."]]
+    note_evac = []
     for g in giorni:
         v = vitali.get(str(g))
         if not v:
             continue
+        if v.get("evacuazione_note"):
+            note_evac.append(f"{it_data(g)}: {v['evacuazione_note']}")
 
         def press(s, d):
             return f"{s}/{d}" if s and d else "-"
@@ -401,11 +407,17 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
             press(v.get("press_sys_s"), v.get("press_dia_s")),
             v.get("puls_s") or "-",
             f"{v.get('saturazione')}%" if v.get("saturazione") else "-",
+            f"{num_it(v['temperatura'])} °C" if v.get("temperatura") else "-",
+            v.get("evacuazioni") if "evacuazioni" in v else "-",
         ])
     if len(righe) > 1:
-        t = Table(righe, colWidths=[3 * cm, 3.6 * cm, 2 * cm, 3.6 * cm, 2 * cm, 2.4 * cm], repeatRows=1)
+        t = Table(righe, colWidths=[2.4 * cm, 3 * cm, 1.5 * cm, 3 * cm, 1.5 * cm, 1.8 * cm, 2.2 * cm, 1.6 * cm], repeatRows=1)
         t.setStyle(TableStyle(stile_tab))
         el.append(t)
+        if note_evac:
+            el.append(Spacer(1, 3))
+            el.append(Paragraph(
+                "<b>Note evacuazione:</b> " + escape("; ".join(note_evac)), piccolo))
     else:
         el.append(Paragraph("Nessun parametro vitale registrato nel periodo.", normale))
 
@@ -446,6 +458,10 @@ dati_app = carica_dati()
 st.title("💧 Nutrimi")
 
 utenti_disponibili = list(dati_app["utenti"].keys())
+if "profilo_da_selezionare" in st.session_state:
+    st.session_state["sel_profilo"] = st.session_state.pop("profilo_da_selezionare")
+if st.session_state.get("sel_profilo", utenti_disponibili[0]) not in utenti_disponibili:
+    st.session_state["sel_profilo"] = utenti_disponibili[0]
 utente_selezionato = st.selectbox(
     "👤 Profilo", utenti_disponibili, key="sel_profilo"
 )
@@ -643,6 +659,42 @@ elif pagina == "📊 Oggi":
                 st.write(f"- Calcio: {n.get('calcio', 0):.1f} mg")
                 st.write(f"- Magnesio: {n.get('magnesio', 0):.1f} mg")
                 st.write(f"- Ferro: {n.get('ferro', 0):.1f} mg")
+
+                st.markdown("---")
+                st.markdown("**✏️ Modifica la porzione consumata**")
+                if qta_cons and qta_cons > 0:
+                    nuova_q = st.number_input(
+                        "Quantità effettivamente consumata (ml o g)",
+                        min_value=1.0,
+                        value=float(qta_cons),
+                        step=10.0,
+                        key=f"mod_q_{utente_selezionato}_{data_str}_{nome_p}_{qta_cons}",
+                    )
+                    scala = float(nuova_q) / float(qta_cons)
+                    if vol_fin and nuova_q > vol_fin:
+                        st.warning(
+                            f"Hai indicato più dei {vol_fin:.0f} preparati: controlla il valore."
+                        )
+                    if abs(scala - 1.0) > 1e-9:
+                        st.caption(
+                            f"Nuovo totale del piatto: {n.get('kcal', 0) * scala:.0f} kcal,"
+                            f" liquidi {n.get('acqua', 0) * scala:.0f} ml,"
+                            f" proteine {n.get('prot', 0) * scala:.1f} g"
+                        )
+                    if st.button(
+                        "💾 Aggiorna porzione",
+                        key=f"agg_{utente_selezionato}_{data_str}_{nome_p}_{qta_cons}",
+                    ):
+                        info["nutrienti"] = {k: float(v) * scala for k, v in n.items()}
+                        info["quantita_consumata"] = float(nuova_q)
+                        salva_dati(dati_app)
+                        st.rerun()
+                else:
+                    st.caption(
+                        "Per questo piatto non c'è una porzione registrata: rimuovilo"
+                        " e inseriscilo di nuovo."
+                    )
+
                 if st.button(
                     f"🗑️ Rimuovi '{nome_p}'",
                     key=f"del_{utente_selezionato}_{data_str}_{nome_p}",
@@ -701,7 +753,7 @@ elif pagina == "🩺 Vitali":
     vit_giorno = parametri_vitali_utente.get(data_v_str, {})
 
     chiave_vit = f"{utente_selezionato}|{data_v_str}"
-    if st.session_state.get("chiave_vit_caricata") != chiave_vit or "p_sys_m" not in st.session_state:
+    if st.session_state.get("chiave_vit_caricata") != chiave_vit or "temp_val" not in st.session_state:
         st.session_state["chiave_vit_caricata"] = chiave_vit
         st.session_state["p_sys_m"] = int(vit_giorno.get("press_sys_m", 0))
         st.session_state["p_dia_m"] = int(vit_giorno.get("press_dia_m", 0))
@@ -710,6 +762,9 @@ elif pagina == "🩺 Vitali":
         st.session_state["p_dia_s"] = int(vit_giorno.get("press_dia_s", 0))
         st.session_state["p_puls_s"] = int(vit_giorno.get("puls_s", 0))
         st.session_state["sat_val"] = int(vit_giorno.get("saturazione", 0))
+        st.session_state["temp_val"] = float(vit_giorno.get("temperatura", 0.0))
+        st.session_state["evac_n"] = int(vit_giorno.get("evacuazioni", 0))
+        st.session_state["evac_note"] = str(vit_giorno.get("evacuazione_note", ""))
 
     st.markdown("**🔴 Pressione mattina**")
     p_sys_m = st.number_input("Sistolica / Max (mmHg)", min_value=0, step=1, key="p_sys_m")
@@ -726,6 +781,18 @@ elif pagina == "🩺 Vitali":
         "Saturazione (% SpO2)", min_value=0, max_value=100, step=1, key="sat_val"
     )
 
+    st.markdown("**🌡️ Temperatura corporea**")
+    temp_val = st.number_input(
+        "Temperatura (°C)", min_value=0.0, max_value=45.0, step=0.1,
+        format="%.1f", key="temp_val",
+    )
+
+    st.markdown("**🚽 Evacuazione**")
+    evac_n = st.number_input(
+        "Numero di evacuazioni nella giornata", min_value=0, step=1, key="evac_n"
+    )
+    evac_note = st.text_input("Note (aspetto, difficoltà...)", key="evac_note")
+
     if st.button("💾 Salva parametri vitali"):
         parametri_vitali_utente[data_v_str] = {
             "press_sys_m": p_sys_m,
@@ -735,6 +802,9 @@ elif pagina == "🩺 Vitali":
             "press_dia_s": p_dia_s,
             "puls_s": p_puls_s,
             "saturazione": sat_val,
+            "temperatura": float(temp_val),
+            "evacuazioni": int(evac_n),
+            "evacuazione_note": evac_note.strip(),
         }
         salva_dati(dati_app)
         st.success("Parametri vitali salvati!")
@@ -751,6 +821,19 @@ elif pagina == "🩺 Vitali":
         st.metric("Saturazione SpO2", f"{sat}%" if sat > 0 else "Non registrata")
         if 0 < sat < 95:
             st.error("⚠️ Attenzione: saturazione sotto il 95%")
+        temp = float(v.get("temperatura", 0.0) or 0.0)
+        st.metric(
+            "Temperatura",
+            f"{temp:.1f} °C".replace(".", ",") if temp > 0 else "Non registrata",
+        )
+        if temp >= 37.5:
+            st.warning("⚠️ Temperatura pari o superiore a 37,5 °C")
+        if "evacuazioni" in v:
+            st.metric("Evacuazioni", f"{int(v.get('evacuazioni', 0))}")
+            if v.get("evacuazione_note"):
+                st.caption(f"Note: {v['evacuazione_note']}")
+        else:
+            st.metric("Evacuazioni", "Non registrate")
 
 # ==========================================
 # PAGINA: MEDIE
@@ -822,6 +905,71 @@ elif pagina == "🥕 Alimenti":
             st.rerun()
         else:
             st.warning("Inserisci il nome dell'alimento.")
+
+    st.markdown("---")
+    st.markdown("**✏️ Modifica o elimina un alimento**")
+    n_sel = st.session_state.get("ing_sel_n", 0)
+    scelto = st.selectbox(
+        "Scegli l'alimento",
+        ingredienti_ordinati,
+        index=None,
+        placeholder="Seleziona un alimento...",
+        key=f"ing_da_modificare_{n_sel}",
+    )
+    if scelto and scelto in dati_app["database"]:
+        att = dati_app["database"][scelto]
+        st.caption(
+            "Le modifiche valgono per i pasti futuri: i piatti già registrati"
+            " mantengono i valori nutrizionali di quando sono stati inseriti."
+        )
+        with st.form(f"form_mod_ing_{scelto}"):
+            nuovo_nome = st.text_input(
+                "Nome alimento", value=scelto, key=f"mod_nome_{scelto}"
+            )
+            nuovi_valori = {}
+            for chiave, etichetta, passo in CAMPI_INGREDIENTE:
+                nuovi_valori[chiave] = st.number_input(
+                    etichetta,
+                    min_value=0.0,
+                    value=float(att.get(chiave, 0.0)),
+                    step=passo,
+                    format="%g",
+                    key=f"mod_{scelto}_{chiave}",
+                )
+            salva_mod = st.form_submit_button("💾 Salva modifiche")
+
+        if salva_mod:
+            nome_n = nuovo_nome.strip()
+            if not nome_n:
+                st.warning("Il nome non può essere vuoto.")
+            elif nome_n != scelto and nome_n in dati_app["database"]:
+                st.warning("Esiste già un alimento con questo nome.")
+            else:
+                if nome_n != scelto:
+                    del dati_app["database"][scelto]
+                dati_app["database"][nome_n] = {
+                    k: float(v) for k, v in nuovi_valori.items()
+                }
+                salva_dati(dati_app)
+                st.session_state["msg_ing"] = f"Alimento '{nome_n}' aggiornato!"
+                st.session_state["ing_sel_n"] = n_sel + 1
+                st.rerun()
+
+        st.markdown("**🗑️ Elimina questo alimento**")
+        conferma_ing = st.checkbox(
+            f"Confermo di voler eliminare '{scelto}'",
+            key=f"conf_del_ing_{scelto}",
+        )
+        if st.button(
+            "🗑️ Elimina alimento",
+            disabled=not conferma_ing,
+            key=f"btn_del_ing_{scelto}",
+        ):
+            del dati_app["database"][scelto]
+            salva_dati(dati_app)
+            st.session_state["msg_ing"] = f"Alimento '{scelto}' eliminato."
+            st.session_state["ing_sel_n"] = n_sel + 1
+            st.rerun()
 
 # ==========================================
 # PAGINA: ESPORTA PER IL MEDICO
@@ -957,6 +1105,52 @@ elif pagina == "👤 Profilo":
             st.success(f"Profilo '{nome}' creato! Selezionalo in alto.")
         else:
             st.warning("Inserisci un nome non ancora usato.")
+
+    st.markdown("---")
+    st.markdown("**✏️ Rinomina profilo**")
+    nome_rin = st.text_input(
+        "Nuovo nome", value=utente_selezionato, key=f"rin_{utente_selezionato}"
+    )
+    if st.button("✏️ Rinomina"):
+        nome = nome_rin.strip()
+        if not nome:
+            st.warning("Il nome non può essere vuoto.")
+        elif nome == utente_selezionato:
+            st.info("Il nome è già questo.")
+        elif nome in dati_app["utenti"]:
+            st.warning("Esiste già un profilo con questo nome.")
+        else:
+            dati_app["utenti"] = {
+                (nome if k == utente_selezionato else k): v
+                for k, v in dati_app["utenti"].items()
+            }
+            salva_dati(dati_app)
+            st.session_state["profilo_da_selezionare"] = nome
+            st.rerun()
+
+    st.markdown("---")
+    st.markdown("**🗑️ Elimina profilo**")
+    if len(dati_app["utenti"]) <= 1:
+        st.info("Non puoi eliminare l'unico profilo presente.")
+    else:
+        st.warning(
+            f"Eliminando '{utente_selezionato}' si cancellano per sempre tutti i"
+            " suoi pasti, parametri vitali e target. Se serve, scarica prima il"
+            " PDF dalla pagina 📄 Esporta."
+        )
+        conf_nome = st.text_input(
+            f"Per confermare scrivi il nome del profilo: {utente_selezionato}",
+            key=f"conf_del_{utente_selezionato}",
+        )
+        if st.button(
+            "🗑️ Elimina definitivamente",
+            disabled=conf_nome.strip().lower() != utente_selezionato.lower(),
+        ):
+            rimasti = [u for u in dati_app["utenti"] if u != utente_selezionato]
+            del dati_app["utenti"][utente_selezionato]
+            salva_dati(dati_app)
+            st.session_state["profilo_da_selezionare"] = rimasti[0]
+            st.rerun()
 
     st.markdown("---")
     auto = st.toggle(

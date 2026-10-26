@@ -507,11 +507,23 @@ if pagina == "🍳 Pasto":
     )
     data_str = str(data_piatto)
 
-    selected_ingredients = st.multiselect(
-        "Ingredienti del piatto",
-        ingredienti_ordinati,
-        key=f"sel_ing_piatto_{n_reset}",
+    # Scelta di un ingrediente alla volta: il menu si chiude da solo
+    # (il multiselect restava aperto e bloccato sul telefono)
+    lista_ing = st.session_state.setdefault("ing_piatto", [])
+    add_n = st.session_state.get("add_n", 0)
+    nuovo_ing = st.selectbox(
+        "➕ Aggiungi un ingrediente",
+        [i for i in ingredienti_ordinati if i not in lista_ing],
+        index=None,
+        placeholder="Tocca per scegliere...",
+        key=f"add_ing_{n_reset}_{add_n}",
     )
+    if nuovo_ing:
+        lista_ing.append(nuovo_ing)
+        st.session_state["add_n"] = add_n + 1
+        st.rerun()
+
+    selected_ingredients = list(lista_ing)
     quantita_ingredienti = {}
     volume_finale = 0.0
     quantita_consumata = 0.0
@@ -529,6 +541,9 @@ if pagina == "🍳 Pasto":
                 key=f"qty_piatto_{ing}_{n_reset}",
             )
             quantita_ingredienti[ing] = float(q) if q else 0.0
+            if st.button(f"✖ Togli {ing}", key=f"togli_{ing}_{n_reset}"):
+                lista_ing.remove(ing)
+                st.rerun()
 
         somma_qta_iniziale = sum(quantita_ingredienti.values())
 
@@ -593,6 +608,7 @@ if pagina == "🍳 Pasto":
             }
             salva_dati(dati_app)
             st.session_state["reset_n"] = n_reset + 1
+            st.session_state["ing_piatto"] = []
             st.session_state["msg_piatto"] = (
                 f"Piatto '{nome_piatto.strip()}' aggiunto per"
                 f" {utente_selezionato} nel giorno {data_str}!"

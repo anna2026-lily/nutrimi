@@ -1,5 +1,8 @@
+import csv
+import io
 import json
 from datetime import date, timedelta
+from xml.sax.saxutils import escape
 
 import gspread
 import streamlit as st
@@ -242,6 +245,198 @@ def calcola_totali_giorno(piatti_giorno):
     return totali
 
 
+# ==========================================
+# ESPORTAZIONE PER IL MEDICO
+# ==========================================
+def giorni_periodo(d_da, d_a):
+    n = (d_a - d_da).days
+    return [d_da + timedelta(days=i) for i in range(n + 1)]
+
+
+def it_data(d):
+    return d.strftime("%d/%m/%Y")
+
+
+def num_it(valore, decimali=1):
+    return f"{float(valore):.{decimali}f}".replace(".", ",")
+
+
+def genera_csv_pasti(registro, d_da, d_a):
+    out = io.StringIO()
+    w = csv.writer(out, delimiter=";")
+    w.writerow([
+        "Data", "Piatto", "Ingredienti", "Porzione consumata (ml/g)",
+        "Calorie (kcal)", "Proteine (g)", "Carboidrati (g)", "Grassi (g)",
+        "Fibre (g)", "Liquidi (ml)", "Potassio (mg)", "Calcio (mg)",
+        "Magnesio (mg)", "Ferro (mg)", "Sodio (mg)", "Fosforo (mg)",
+    ])
+    for g in giorni_periodo(d_da, d_a):
+        for nome, info in registro.get(str(g), {}).items():
+            n = info.get("nutrienti", {})
+            ingr = ", ".join(
+                f"{k} {q:g}" for k, q in info.get("ingredienti", {}).items() if q > 0
+            )
+            w.writerow([
+                it_data(g), nome, ingr,
+                num_it(info.get("quantita_consumata", 0), 0),
+                num_it(n.get("kcal", 0)), num_it(n.get("prot", 0)),
+                num_it(n.get("carb", 0)), num_it(n.get("grassi", 0)),
+                num_it(n.get("fibre", 0)), num_it(n.get("acqua", 0), 0),
+                num_it(n.get("potassio", 0)), num_it(n.get("calcio", 0)),
+                num_it(n.get("magnesio", 0)), num_it(n.get("ferro", 0)),
+                num_it(n.get("sodio", 0)), num_it(n.get("fosforo", 0)),
+            ])
+    # utf-8-sig: Excel mostra correttamente le lettere accentate
+    return out.getvalue().encode("utf-8-sig")
+
+
+def genera_csv_vitali(vitali, d_da, d_a):
+    out = io.StringIO()
+    w = csv.writer(out, delimiter=";")
+    w.writerow([
+        "Data", "Sistolica mattina", "Diastolica mattina", "Pulsazioni mattina",
+        "Sistolica sera", "Diastolica sera", "Pulsazioni sera", "Saturazione SpO2 (%)",
+    ])
+    for g in giorni_periodo(d_da, d_a):
+        v = vitali.get(str(g))
+        if v:
+            w.writerow([
+                it_data(g), v.get("press_sys_m", 0), v.get("press_dia_m", 0),
+                v.get("puls_m", 0), v.get("press_sys_s", 0),
+                v.get("press_dia_s", 0), v.get("puls_s", 0), v.get("saturazione", 0),
+            ])
+    return out.getvalue().encode("utf-8-sig")
+
+
+def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
+    from reportlab.lib import colors
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
+    from reportlab.lib.units import cm
+    from reportlab.platypus import (
+        Paragraph, SimpleDocTemplate, Spacer, Table, TableStyle,
+    )
+
+    stili = getSampleStyleSheet()
+    normale = ParagraphStyle("n", parent=stili["Normal"], fontSize=9, leading=11)
+    piccolo = ParagraphStyle("p", parent=normale, fontSize=8, leading=10)
+    titolo = ParagraphStyle("t", parent=stili["Title"], fontSize=17)
+    sezione = ParagraphStyle("s", parent=stili["Heading2"], fontSize=12, spaceBefore=10)
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(
+        buf, pagesize=A4, leftMargin=1.5 * cm, rightMargin=1.5 * cm,
+        topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+        title=f"Nutrimi - {nome}",
+    )
+    el = []
+    el.append(Paragraph("Riepilogo alimentazione e parametri vitali", titolo))
+    el.append(Paragraph(
+        f"<b>Paziente:</b> {escape(nome)} &nbsp;&nbsp; "
+        f"<b>Periodo:</b> {it_data(d_da)} - {it_data(d_a)} &nbsp;&nbsp; "
+        f"<b>Generato il:</b> {it_data(date.today())}", normale))
+    el.append(Paragraph(
+        f"Sesso: {escape(str(anagrafica.get('sesso', '-')))}, "
+        f"età: {anagrafica.get('eta', '-')} anni, "
+        f"altezza: {anagrafica.get('altezza', '-')} cm, "
+        f"peso: {anagrafica.get('peso', '-')} kg, "
+        f"mobilità: {escape(str(anagrafica.get('mobilita', '-')))}", normale))
+
+    stile_tab = [
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#DDEAF6")),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.4, colors.grey),
+        ("VALIGN", (0, 0), (-1, -1), "TOP"),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#F6F6F6")]),
+    ]
+
+    giorni = giorni_periodo(d_da, d_a)
+
+    # --- Sintesi alimentazione ---
+    giorni_reg = [g for g in giorni if registro.get(str(g))]
+    el.append(Paragraph("Sintesi alimentazione", sezione))
+    if giorni_reg:
+        tot = {k: 0.0 for k in CHIAVI}
+        for g in giorni_reg:
+            t = calcola_totali_giorno(registro[str(g)])
+            for k in CHIAVI:
+                tot[k] += t[k]
+        n = len(giorni_reg)
+        righe = [["Valore medio al giorno", "Assunto", "Obiettivo"]]
+        for etichetta, chiave, unita, dec in (
+            ("Calorie", "kcal", "kcal", 0), ("Proteine", "prot", "g", 1),
+            ("Carboidrati", "carb", "g", 1), ("Grassi", "grassi", "g", 1),
+            ("Fibre", "fibre", "g", 1), ("Liquidi", "acqua", "ml", 0),
+            ("Potassio", "potassio", "mg", 0), ("Calcio", "calcio", "mg", 0),
+            ("Sodio", "sodio", "mg", 0),
+        ):
+            righe.append([
+                etichetta, f"{num_it(tot[chiave] / n, dec)} {unita}",
+                f"{num_it(obiettivi.get(chiave, 0), dec)} {unita}",
+            ])
+        t = Table(righe, colWidths=[7 * cm, 5 * cm, 5 * cm])
+        t.setStyle(TableStyle(stile_tab))
+        el.append(Paragraph(
+            f"Giorni con alimentazione registrata: {n} su {len(giorni)}.", normale))
+        el.append(Spacer(1, 4))
+        el.append(t)
+    else:
+        el.append(Paragraph("Nessun pasto registrato nel periodo.", normale))
+
+    # --- Parametri vitali ---
+    el.append(Paragraph("Parametri vitali", sezione))
+    righe = [["Data", "Pressione mattina", "Polso", "Pressione sera", "Polso", "SpO2"]]
+    for g in giorni:
+        v = vitali.get(str(g))
+        if not v:
+            continue
+
+        def press(s, d):
+            return f"{s}/{d}" if s and d else "-"
+
+        righe.append([
+            it_data(g),
+            press(v.get("press_sys_m"), v.get("press_dia_m")),
+            v.get("puls_m") or "-",
+            press(v.get("press_sys_s"), v.get("press_dia_s")),
+            v.get("puls_s") or "-",
+            f"{v.get('saturazione')}%" if v.get("saturazione") else "-",
+        ])
+    if len(righe) > 1:
+        t = Table(righe, colWidths=[3 * cm, 3.6 * cm, 2 * cm, 3.6 * cm, 2 * cm, 2.4 * cm], repeatRows=1)
+        t.setStyle(TableStyle(stile_tab))
+        el.append(t)
+    else:
+        el.append(Paragraph("Nessun parametro vitale registrato nel periodo.", normale))
+
+    # --- Dettaglio giornaliero ---
+    el.append(Paragraph("Dettaglio giornaliero dei pasti", sezione))
+    righe = [["Data", "Piatti consumati", "kcal", "Prot. g", "Carb. g", "Grassi g", "Liquidi ml"]]
+    for g in giorni_reg:
+        piatti = registro[str(g)]
+        t = calcola_totali_giorno(piatti)
+        righe.append([
+            it_data(g),
+            Paragraph(escape(", ".join(piatti.keys())), piccolo),
+            num_it(t["kcal"], 0), num_it(t["prot"]), num_it(t["carb"]),
+            num_it(t["grassi"]), num_it(t["acqua"], 0),
+        ])
+    if len(righe) > 1:
+        t = Table(righe, colWidths=[2.3 * cm, 6.2 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 1.8 * cm, 2.1 * cm], repeatRows=1)
+        t.setStyle(TableStyle(stile_tab))
+        el.append(t)
+    else:
+        el.append(Paragraph("Nessun pasto registrato nel periodo.", normale))
+
+    el.append(Spacer(1, 10))
+    el.append(Paragraph(
+        "Dati inseriti manualmente nell'app Nutrimi. I valori nutrizionali sono "
+        "stime calcolate da tabelle di riferimento e non sostituiscono il parere medico.",
+        piccolo))
+    doc.build(el)
+    return buf.getvalue()
+
+
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
 dati_app = carica_dati()
 
@@ -255,7 +450,10 @@ utente_selezionato = st.selectbox(
     "👤 Profilo", utenti_disponibili, key="sel_profilo"
 )
 
-PAGINE = ["🍳 Pasto", "📊 Oggi", "🩺 Vitali", "📈 Medie", "🥕 Alimenti", "👤 Profilo"]
+PAGINE = [
+    "🍳 Pasto", "📊 Oggi", "🩺 Vitali", "📈 Medie",
+    "🥕 Alimenti", "📄 Esporta", "👤 Profilo",
+]
 pagina = st.radio(
     "Pagina", PAGINE, horizontal=True, key="pagina", label_visibility="collapsed"
 )
@@ -624,6 +822,63 @@ elif pagina == "🥕 Alimenti":
             st.rerun()
         else:
             st.warning("Inserisci il nome dell'alimento.")
+
+# ==========================================
+# PAGINA: ESPORTA PER IL MEDICO
+# ==========================================
+elif pagina == "📄 Esporta":
+    st.subheader("Esporta i dati per il medico")
+    st.write(
+        f"Profilo: **{utente_selezionato}**. Scegli il periodo e scarica il"
+        " riepilogo da stampare o inviare."
+    )
+
+    oggi = date.today()
+    d_da = st.date_input("Dal", value=oggi - timedelta(days=30), key="exp_da")
+    d_a = st.date_input("Al", value=oggi, key="exp_a")
+
+    if d_da > d_a:
+        st.error("La data iniziale deve essere precedente a quella finale.")
+    else:
+        nome_file = "".join(
+            c if c.isalnum() else "_" for c in utente_selezionato
+        ) + f"_{d_da}_{d_a}"
+
+        st.markdown("##### 📄 Riepilogo in PDF (consigliato per il medico)")
+        try:
+            pdf_bytes = genera_pdf(
+                utente_selezionato, anagrafica_utente, obiettivi_utente,
+                registro_utente, parametri_vitali_utente, d_da, d_a,
+            )
+            st.download_button(
+                "⬇️ Scarica il PDF",
+                data=pdf_bytes,
+                file_name=f"nutrimi_{nome_file}.pdf",
+                mime="application/pdf",
+            )
+        except ImportError:
+            st.error(
+                "Manca la libreria per il PDF: aggiungi 'reportlab' al file"
+                " requirements.txt su GitHub."
+            )
+
+        st.markdown("##### 📊 Tabelle per Excel")
+        st.download_button(
+            "⬇️ Pasti (CSV)",
+            data=genera_csv_pasti(registro_utente, d_da, d_a),
+            file_name=f"nutrimi_pasti_{nome_file}.csv",
+            mime="text/csv",
+        )
+        st.download_button(
+            "⬇️ Parametri vitali (CSV)",
+            data=genera_csv_vitali(parametri_vitali_utente, d_da, d_a),
+            file_name=f"nutrimi_vitali_{nome_file}.csv",
+            mime="text/csv",
+        )
+        st.caption(
+            "Il PDF riassume medie, parametri vitali e pasti giorno per giorno."
+            " I file CSV si aprono con Excel e contengono il dettaglio."
+        )
 
 # ==========================================
 # PAGINA: PROFILO

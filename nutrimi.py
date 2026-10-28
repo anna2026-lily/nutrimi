@@ -976,36 +976,6 @@ elif pagina == "🥕 Alimenti":
     if "msg_ing" in st.session_state:
         st.success(st.session_state.pop("msg_ing"))
 
-    with st.expander("🔍 Elenco alimenti in ordine alfabetico"):
-        for nome in ingredienti_ordinati:
-            st.write(f"- {nome}")
-
-    st.markdown("**Aggiungi un nuovo alimento** (valori per 100 g)")
-    with st.form("form_ingrediente", clear_on_submit=True):
-        nome_ing = st.text_input("Nome alimento")
-        valori_ing = {}
-        for chiave, etichetta, passo in CAMPI_INGREDIENTE:
-            val = st.number_input(
-                etichetta,
-                value=None,
-                min_value=0.0,
-                step=passo,
-                placeholder="0",
-                key=f"ing_{chiave}",
-            )
-            valori_ing[chiave] = float(val) if val else 0.0
-        invia_ing = st.form_submit_button("💾 Salva alimento")
-
-    if invia_ing:
-        if nome_ing.strip():
-            dati_app["database"][nome_ing.strip()] = valori_ing
-            salva_dati(dati_app)
-            st.session_state["msg_ing"] = f"Alimento '{nome_ing.strip()}' salvato!"
-            st.rerun()
-        else:
-            st.warning("Inserisci il nome dell'alimento.")
-
-    st.markdown("---")
     st.markdown("**✏️ Modifica o elimina un alimento**")
     n_sel = st.session_state.get("ing_sel_n", 0)
     scelto = st.selectbox(
@@ -1069,6 +1039,32 @@ elif pagina == "🥕 Alimenti":
             st.session_state["msg_ing"] = f"Alimento '{scelto}' eliminato."
             st.session_state["ing_sel_n"] = n_sel + 1
             st.rerun()
+
+    st.markdown("---")
+    with st.expander("➕ Aggiungi un nuovo alimento (valori per 100 g)"):
+        with st.form("form_ingrediente", clear_on_submit=True):
+            nome_ing = st.text_input("Nome alimento")
+            valori_ing = {}
+            for chiave, etichetta, passo in CAMPI_INGREDIENTE:
+                val = st.number_input(
+                    etichetta,
+                    value=None,
+                    min_value=0.0,
+                    step=passo,
+                    placeholder="0",
+                    key=f"ing_{chiave}",
+                )
+                valori_ing[chiave] = float(val) if val else 0.0
+            invia_ing = st.form_submit_button("💾 Salva alimento")
+
+        if invia_ing:
+            if nome_ing.strip():
+                dati_app["database"][nome_ing.strip()] = valori_ing
+                salva_dati(dati_app)
+                st.session_state["msg_ing"] = f"Alimento '{nome_ing.strip()}' salvato!"
+                st.rerun()
+            else:
+                st.warning("Inserisci il nome dell'alimento.")
 
 # ==========================================
 # PAGINA: ESPORTA PER IL MEDICO

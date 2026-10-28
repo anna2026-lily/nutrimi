@@ -449,6 +449,26 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
     return buf.getvalue()
 
 
+def ricalcola_piatto(info, nuove_qta, nuovo_vol, nuova_cons, db):
+    """Nuovi nutrienti della porzione dopo la modifica di ingredienti,
+    volume totale o quantità consumata. None se non calcolabile."""
+    vol_old = float(info.get("volume_finale") or 0)
+    cons_old = float(info.get("quantita_consumata") or 0)
+    if vol_old <= 0 or cons_old <= 0 or nuovo_vol <= 0 or nuova_cons <= 0:
+        return None
+    vecchie = info.get("ingredienti", {})
+    n_old = info.get("nutrienti", {})
+    # Totale dell'intera preparazione, ricavato dai valori già salvati
+    tot = {k: float(n_old.get(k, 0.0)) * vol_old / cons_old for k in CHIAVI}
+    # Applico solo la differenza degli ingredienti modificati
+    for ing, q_nuova in nuove_qta.items():
+        delta = float(q_nuova) - float(vecchie.get(ing, 0.0))
+        if delta and ing in db:
+            for k in CHIAVI:
+                tot[k] += float(db[ing].get(k, 0.0)) * delta / 100.0
+    return {k: max(v, 0.0) * nuova_cons / nuovo_vol for k, v in tot.items()}
+
+
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
 dati_app = carica_dati()
 
@@ -462,9 +482,25 @@ if "profilo_da_selezionare" in st.session_state:
     st.session_state["sel_profilo"] = st.session_state.pop("profilo_da_selezionare")
 if st.session_state.get("sel_profilo", utenti_disponibili[0]) not in utenti_disponibili:
     st.session_state["sel_profilo"] = utenti_disponibili[0]
+if "sel_profilo" not in st.session_state:
+    # Apertura dell'app: riparto dall'ultimo profilo usato
+    iniziale = st.query_params.get("profilo")
+    if iniziale not in utenti_disponibili:
+        iniziale = dati_app.get("ultimo_profilo")
+    if iniziale in utenti_disponibili:
+        st.session_state["sel_profilo"] = iniziale
 utente_selezionato = st.selectbox(
     "👤 Profilo", utenti_disponibili, key="sel_profilo"
 )
+
+# Memorizzo la scelta: nell'indirizzo (ricarica della pagina) e nel foglio
+# (riapertura dell'app da qualsiasi telefono)
+st.query_params["profilo"] = utente_selezionato
+_prec = st.session_state.get("profilo_precedente")
+if _prec is not None and _prec != utente_selezionato:
+    dati_app["ultimo_profilo"] = utente_selezionato
+    salva_dati(dati_app)
+st.session_state["profilo_precedente"] = utente_selezionato
 
 PAGINE = [
     "🍳 Pasto", "📊 Oggi", "🩺 Vitali", "📈 Medie",
@@ -660,10 +696,6 @@ elif pagina == "📊 Oggi":
                 qta_cons = info.get("quantita_consumata")
                 if vol_fin and qta_cons:
                     st.write(f"Volume totale: **{vol_fin:.0f} ml** — porzione consumata: **{qta_cons:.0f} ml**")
-                st.markdown("*Ingredienti:*")
-                for ing, qta in info.get("ingredienti", {}).items():
-                    if qta > 0:
-                        st.write(f"- {ing}: {qta:g} g/ml")
                 n = info.get("nutrienti", {})
                 st.markdown("*Nutrienti assunti:*")
                 st.write(f"- Liquidi: {n.get('acqua', 0):.0f} ml")
@@ -677,34 +709,85 @@ elif pagina == "📊 Oggi":
                 st.write(f"- Ferro: {n.get('ferro', 0):.1f} mg")
 
                 st.markdown("---")
-                st.markdown("**✏️ Modifica la porzione consumata**")
-                if qta_cons and qta_cons > 0:
-                    nuova_q = st.number_input(
-                        "Quantità effettivamente consumata (ml o g)",
-                        min_value=1.0,
-                        value=float(qta_cons),
-                        step=10.0,
-                        key=f"mod_q_{utente_selezionato}_{data_str}_{nome_p}_{qta_cons}",
+                st.markdown("**✏️ Modifica ingredienti e porzione**")
+                vol_old = float(vol_fin or 0)
+                cons_old = float(qta_cons or 0)
+                if vol_old > 0 and cons_old > 0:
+                    rev = info.get("rev", 0)
+                    base_key = f"{utente_selezionato}_{data_str}_{nome_p}_{rev}"
+                    db_att = dati_app["database"]
+                    ingr_attuali = {
+                        k: float(v) for k, v in info.get("ingredienti", {}).items()
+                    }
+                    nuove_qta = {}
+                    for ing, qta in ingr_attuali.items():
+                        nel_db = ing in db_att
+                        q_nuova = st.number_input(
+                            f"{ing} (g o ml)"
+                            + ("" if nel_db else " — non più nel database"),
+                            min_value=0.0,
+                            value=qta,
+                            step=1.0,
+                            format="%g",
+                            disabled=not nel_db,
+                            key=f"mod_ing_{base_key}_{ing}",
+                        )
+                        nuove_qta[ing] = float(q_nuova)
+                    # Il volume segue la variazione degli ingredienti (modificabile)
+                    delta_ing = sum(
+                        nuove_qta[k] - ingr_attuali[k] for k in ingr_attuali
                     )
-                    scala = float(nuova_q) / float(qta_cons)
-                    if vol_fin and nuova_q > vol_fin:
-                        st.warning(
-                            f"Hai indicato più dei {vol_fin:.0f} preparati: controlla il valore."
-                        )
-                    if abs(scala - 1.0) > 1e-9:
+                    vol_proposto = max(vol_old + delta_ing, 1.0)
+                    nuovo_vol = st.number_input(
+                        "Volume totale preparato (ml)",
+                        min_value=1.0, value=vol_proposto, step=10.0, format="%g",
+                        key=f"mod_vol_{base_key}_{delta_ing:g}",
+                    )
+                    if abs(delta_ing) > 1e-9:
                         st.caption(
-                            f"Nuovo totale del piatto: {n.get('kcal', 0) * scala:.0f} kcal,"
-                            f" liquidi {n.get('acqua', 0) * scala:.0f} ml,"
-                            f" proteine {n.get('prot', 0) * scala:.1f} g"
+                            f"Volume aggiornato di {delta_ing:+g} in base agli"
+                            " ingredienti: correggilo se serve."
                         )
-                    if st.button(
-                        "💾 Aggiorna porzione",
-                        key=f"agg_{utente_selezionato}_{data_str}_{nome_p}_{qta_cons}",
-                    ):
-                        info["nutrienti"] = {k: float(v) * scala for k, v in n.items()}
-                        info["quantita_consumata"] = float(nuova_q)
-                        salva_dati(dati_app)
-                        st.rerun()
+                    nuova_cons = st.number_input(
+                        "Quantità consumata (ml o g)",
+                        min_value=1.0, value=cons_old, step=10.0, format="%g",
+                        key=f"mod_cons_{base_key}",
+                    )
+                    if nuova_cons > nuovo_vol:
+                        st.warning(
+                            "La quantità consumata supera il volume preparato:"
+                            " controlla i valori."
+                        )
+                    nuovi_nutr = ricalcola_piatto(
+                        info, nuove_qta, nuovo_vol, nuova_cons, db_att
+                    )
+                    cambiato = (
+                        nuove_qta != ingr_attuali
+                        or abs(nuovo_vol - vol_old) > 1e-9
+                        or abs(nuova_cons - cons_old) > 1e-9
+                    )
+                    if cambiato and nuovi_nutr:
+                        st.caption(
+                            f"Nuovo totale del piatto: {nuovi_nutr['kcal']:.0f} kcal,"
+                            f" liquidi {nuovi_nutr['acqua']:.0f} ml,"
+                            f" proteine {nuovi_nutr['prot']:.1f} g"
+                        )
+                    if st.button("💾 Aggiorna piatto", key=f"agg_{base_key}"):
+                        if not any(q > 0 for q in nuove_qta.values()):
+                            st.warning(
+                                "Serve almeno un ingrediente con quantità maggiore"
+                                " di 0. Per eliminare il piatto usa Rimuovi."
+                            )
+                        elif nuovi_nutr:
+                            info["ingredienti"] = {
+                                k: q for k, q in nuove_qta.items() if q > 0
+                            }
+                            info["volume_finale"] = float(nuovo_vol)
+                            info["quantita_consumata"] = float(nuova_cons)
+                            info["nutrienti"] = nuovi_nutr
+                            info["rev"] = rev + 1
+                            salva_dati(dati_app)
+                            st.rerun()
                 else:
                     st.caption(
                         "Per questo piatto non c'è una porzione registrata: rimuovilo"

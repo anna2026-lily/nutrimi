@@ -1,7 +1,9 @@
 import csv
 import io
 import json
-from datetime import date, timedelta
+import uuid
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 from xml.sax.saxutils import escape
 
 import gspread
@@ -25,6 +27,7 @@ html { font-size: 19px; }
 }
 input, textarea { font-size: 1.05rem !important; }
 div[role="radiogroup"] { gap: 0.3rem 0.8rem; }
+div[data-testid="stCheckbox"] label { min-height: 2.6rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -76,6 +79,12 @@ DB_RAW = {
 DATABASE_INIZIALE = {
     nome: {k: float(v) for k, v in zip(CHIAVI, valori)}
     for nome, valori in DB_RAW.items()
+}
+
+MOMENTI_FARMACI = ["Mattina", "Pranzo", "Sera", "Notte", "Al bisogno"]
+ICONE_MOMENTI = {
+    "Mattina": "🌅", "Pranzo": "☀️", "Sera": "🌆", "Notte": "🌙",
+    "Al bisogno": "➕",
 }
 
 MOBILITA_OPZIONI = ["Molto sedentaria / A letto", "Sedentaria leggera", "Attiva"]
@@ -147,6 +156,8 @@ def nuovo_utente():
         "obiettivi": dict(DEFAULT_OBIETTIVI),
         "anagrafica": dict(DEFAULT_ANAGRAFICA),
         "parametri_vitali": {},
+        "farmaci": [],
+        "farmaci_assunti": {},
     }
 
 
@@ -216,6 +227,8 @@ def carica_dati():
         u.setdefault("registro", {})
         u.setdefault("anagrafica", dict(DEFAULT_ANAGRAFICA))
         u.setdefault("parametri_vitali", {})
+        u.setdefault("farmaci", [])
+        u.setdefault("farmaci_assunti", {})
         obiettivi = u.setdefault("obiettivi", dict(DEFAULT_OBIETTIVI))
         for k, v in DEFAULT_OBIETTIVI.items():
             obiettivi.setdefault(k, v)
@@ -469,6 +482,30 @@ def ricalcola_piatto(info, nuove_qta, nuovo_vol, nuova_cons, db):
     return {k: max(v, 0.0) * nuova_cons / nuovo_vol for k, v in tot.items()}
 
 
+def ora_italiana():
+    try:
+        return datetime.now(ZoneInfo("Europe/Rome"))
+    except Exception:
+        return datetime.now(timezone(timedelta(hours=1)))
+
+
+def cambia_farmaco(utente, data_str, fid, chiave_widget):
+    """Si attiva solo quando qualcuno tocca la spunta: salva subito."""
+    spunta = bool(st.session_state.get(chiave_widget))
+    d = carica_dati()
+    u = d["utenti"].get(utente)
+    if u is None:
+        return
+    giorno = u.setdefault("farmaci_assunti", {}).setdefault(data_str, {})
+    if spunta:
+        giorno[fid] = ora_italiana().strftime("%H:%M")
+    else:
+        giorno.pop(fid, None)
+    if not giorno:
+        u["farmaci_assunti"].pop(data_str, None)
+    salva_dati(d)
+
+
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
 dati_app = carica_dati()
 
@@ -503,7 +540,7 @@ if _prec is not None and _prec != utente_selezionato:
 st.session_state["profilo_precedente"] = utente_selezionato
 
 PAGINE = [
-    "🍳 Pasto", "📊 Oggi", "🩺 Vitali", "📈 Medie",
+    "🍳 Pasto", "💊 Farmaci", "📊 Oggi", "🩺 Vitali", "📈 Medie",
     "🥕 Alimenti", "📄 Esporta", "👤 Profilo",
 ]
 pagina = st.radio(
@@ -840,6 +877,143 @@ elif pagina == "📊 Oggi":
             mostra_confronto("Vit. C", "mg", "vit_c")
             mostra_confronto("Vit. A", "mcg", "vit_a")
             mostra_confronto("Vit. B6", "mg", "vit_b6")
+
+# ==========================================
+# PAGINA: FARMACI
+# ==========================================
+elif pagina == "💊 Farmaci":
+    st.subheader("Farmaci")
+
+    if "msg_farm" in st.session_state:
+        st.success(st.session_state.pop("msg_farm"))
+
+    data_f = st.date_input("Giornata", value=date.today(), key="data_farmaci")
+    data_f_str = str(data_f)
+    elenco = dati_utente["farmaci"]
+    assunti_g = dati_utente["farmaci_assunti"].get(data_f_str, {})
+
+    if not elenco:
+        st.info("Non c'è ancora nessun farmaco: aggiungili qui sotto.")
+    else:
+        programmati = [f for f in elenco if f.get("momento") != "Al bisogno"]
+        n_prese = sum(1 for f in programmati if f["id"] in assunti_g)
+        if programmati:
+            if n_prese == len(programmati):
+                st.success(
+                    f"✅ Tutti i farmaci programmati assunti ({n_prese} su {len(programmati)})"
+                )
+            else:
+                st.warning(
+                    f"Assunti {n_prese} su {len(programmati)} farmaci programmati"
+                )
+
+        st.caption("Tocca la casella quando il farmaco è stato assunto.")
+        for momento in MOMENTI_FARMACI:
+            gruppo = [f for f in elenco if f.get("momento") == momento]
+            if not gruppo:
+                continue
+            st.markdown(f"**{ICONE_MOMENTI[momento]} {momento}**")
+            for f in gruppo:
+                presa = f["id"] in assunti_g
+                # la chiave cambia con lo stato: se un altro telefono spunta,
+                # la casella si aggiorna da sola
+                k = f"farm_{utente_selezionato}_{data_f_str}_{f['id']}_{int(presa)}"
+                etichetta = f["nome"] + (f" — {f['dose']}" if f.get("dose") else "")
+                st.checkbox(
+                    etichetta,
+                    value=presa,
+                    key=k,
+                    on_change=cambia_farmaco,
+                    args=(utente_selezionato, data_f_str, f["id"], k),
+                )
+                if presa:
+                    st.caption(f"Assunto alle {assunti_g[f['id']]}")
+
+    st.markdown("---")
+    with st.expander("➕ Aggiungi un farmaco"):
+        st.caption(
+            "Se un farmaco va preso in più momenti della giornata, aggiungilo"
+            " una volta per ogni momento."
+        )
+        with st.form("form_nuovo_farmaco", clear_on_submit=True):
+            nome_f = st.text_input("Nome del farmaco")
+            dose_f = st.text_input("Dose (facoltativa, es. 1 compressa)")
+            momento_f = st.selectbox("Quando va assunto", MOMENTI_FARMACI)
+            invia_f = st.form_submit_button("💾 Salva farmaco")
+        if invia_f:
+            nome = nome_f.strip()
+            if not nome:
+                st.warning("Inserisci il nome del farmaco.")
+            elif any(
+                x["nome"].lower() == nome.lower() and x["momento"] == momento_f
+                for x in elenco
+            ):
+                st.warning("Questo farmaco è già presente per quel momento.")
+            else:
+                elenco.append({
+                    "id": uuid.uuid4().hex[:10],
+                    "nome": nome,
+                    "dose": dose_f.strip(),
+                    "momento": momento_f,
+                })
+                salva_dati(dati_app)
+                st.session_state["msg_farm"] = f"Farmaco '{nome}' aggiunto ({momento_f})."
+                st.rerun()
+
+    with st.expander("✏️ Modifica o elimina un farmaco"):
+        n_f = st.session_state.get("farm_sel_n", 0)
+        voci = {f"{x['nome']} — {x['momento']}": x for x in elenco}
+        scelta = st.selectbox(
+            "Scegli il farmaco",
+            list(voci.keys()),
+            index=None,
+            placeholder="Seleziona un farmaco...",
+            key=f"farm_da_mod_{n_f}",
+        )
+        if scelta:
+            f = voci[scelta]
+            with st.form(f"form_mod_farm_{f['id']}"):
+                nome_m = st.text_input("Nome del farmaco", value=f["nome"], key=f"fm_nome_{f['id']}")
+                dose_m = st.text_input("Dose", value=f.get("dose", ""), key=f"fm_dose_{f['id']}")
+                idx_m = MOMENTI_FARMACI.index(f["momento"]) if f.get("momento") in MOMENTI_FARMACI else 0
+                momento_m = st.selectbox("Quando va assunto", MOMENTI_FARMACI, index=idx_m, key=f"fm_mom_{f['id']}")
+                salva_m = st.form_submit_button("💾 Salva modifiche")
+            if salva_m:
+                nome = nome_m.strip()
+                if not nome:
+                    st.warning("Il nome non può essere vuoto.")
+                elif any(
+                    x["id"] != f["id"]
+                    and x["nome"].lower() == nome.lower()
+                    and x["momento"] == momento_m
+                    for x in elenco
+                ):
+                    st.warning("Esiste già questo farmaco per quel momento.")
+                else:
+                    f["nome"], f["dose"], f["momento"] = nome, dose_m.strip(), momento_m
+                    salva_dati(dati_app)
+                    st.session_state["msg_farm"] = f"Farmaco '{nome}' aggiornato."
+                    st.session_state["farm_sel_n"] = n_f + 1
+                    st.rerun()
+
+            st.markdown("**🗑️ Elimina questo farmaco**")
+            st.caption("Sparisce dall'elenco e dalle spunte dei giorni passati.")
+            conf_f = st.checkbox(
+                f"Confermo di voler eliminare '{f['nome']}' ({f['momento']})",
+                key=f"conf_del_farm_{f['id']}",
+            )
+            if st.button(
+                "🗑️ Elimina farmaco",
+                disabled=not conf_f,
+                key=f"btn_del_farm_{f['id']}",
+            ):
+                dati_utente["farmaci"] = [x for x in elenco if x["id"] != f["id"]]
+                for giorno in dati_utente["farmaci_assunti"].values():
+                    giorno.pop(f["id"], None)
+                salva_dati(dati_app)
+                st.session_state["msg_farm"] = f"Farmaco '{f['nome']}' eliminato."
+                st.session_state["farm_sel_n"] = n_f + 1
+                st.rerun()
 
 # ==========================================
 # PAGINA: VITALI

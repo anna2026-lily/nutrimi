@@ -27,7 +27,6 @@ html { font-size: 19px; }
 }
 input, textarea { font-size: 1.05rem !important; }
 div[role="radiogroup"] { gap: 0.3rem 0.8rem; }
-div[data-testid="stCheckbox"] label { min-height: 2.6rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -489,23 +488,6 @@ def ora_italiana():
         return datetime.now(timezone(timedelta(hours=1)))
 
 
-def cambia_farmaco(utente, data_str, fid, chiave_widget):
-    """Si attiva solo quando qualcuno tocca la spunta: salva subito."""
-    spunta = bool(st.session_state.get(chiave_widget))
-    d = carica_dati()
-    u = d["utenti"].get(utente)
-    if u is None:
-        return
-    giorno = u.setdefault("farmaci_assunti", {}).setdefault(data_str, {})
-    if spunta:
-        giorno[fid] = ora_italiana().strftime("%H:%M")
-    else:
-        giorno.pop(fid, None)
-    if not giorno:
-        u["farmaci_assunti"].pop(data_str, None)
-    salva_dati(d)
-
-
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
 dati_app = carica_dati()
 
@@ -907,7 +889,10 @@ elif pagina == "💊 Farmaci":
                     f"Assunti {n_prese} su {len(programmati)} farmaci programmati"
                 )
 
-        st.caption("Tocca la casella quando il farmaco è stato assunto.")
+        st.caption(
+            "Tocca un farmaco per segnarlo come assunto. Per annullare un'assunzione"
+            " devi toccarlo di nuovo e confermare."
+        )
         for momento in MOMENTI_FARMACI:
             gruppo = [f for f in elenco if f.get("momento") == momento]
             if not gruppo:
@@ -915,19 +900,43 @@ elif pagina == "💊 Farmaci":
             st.markdown(f"**{ICONE_MOMENTI[momento]} {momento}**")
             for f in gruppo:
                 presa = f["id"] in assunti_g
-                # la chiave cambia con lo stato: se un altro telefono spunta,
-                # la casella si aggiorna da sola
-                k = f"farm_{utente_selezionato}_{data_f_str}_{f['id']}_{int(presa)}"
-                etichetta = f["nome"] + (f" — {f['dose']}" if f.get("dose") else "")
-                st.checkbox(
-                    etichetta,
-                    value=presa,
-                    key=k,
-                    on_change=cambia_farmaco,
-                    args=(utente_selezionato, data_f_str, f["id"], k),
-                )
+                nome_dose = f["nome"] + (f" — {f['dose']}" if f.get("dose") else "")
                 if presa:
-                    st.caption(f"Assunto alle {assunti_g[f['id']]}")
+                    etichetta = f"✅ {nome_dose} · assunto alle {assunti_g[f['id']]}"
+                else:
+                    etichetta = f"⬜ {nome_dose}"
+                chiave_f = f"{utente_selezionato}_{data_f_str}_{f['id']}"
+                id_conferma = (utente_selezionato, data_f_str, f["id"])
+
+                if presa and st.session_state.get("farm_da_annullare") == id_conferma:
+                    # Richiesta di conferma prima di annullare l'assunzione
+                    st.warning(
+                        f"Annullare l'assunzione di **{nome_dose}**"
+                        f" (segnata alle {assunti_g[f['id']]})?"
+                    )
+                    if st.button("✅ Sì, annulla l'assunzione", key=f"si_{chiave_f}"):
+                        giorno = dati_utente["farmaci_assunti"].setdefault(data_f_str, {})
+                        giorno.pop(f["id"], None)
+                        if not giorno:
+                            dati_utente["farmaci_assunti"].pop(data_f_str, None)
+                        salva_dati(dati_app)
+                        st.session_state.pop("farm_da_annullare", None)
+                        st.rerun()
+                    if st.button("↩️ No, lascia come assunto", key=f"no_{chiave_f}"):
+                        st.session_state.pop("farm_da_annullare", None)
+                        st.rerun()
+                elif st.button(
+                    etichetta,
+                    key=f"farm_{chiave_f}",
+                    type="primary" if presa else "secondary",
+                ):
+                    if presa:
+                        st.session_state["farm_da_annullare"] = id_conferma
+                    else:
+                        giorno = dati_utente["farmaci_assunti"].setdefault(data_f_str, {})
+                        giorno[f["id"]] = ora_italiana().strftime("%H:%M")
+                        salva_dati(dati_app)
+                    st.rerun()
 
     st.markdown("---")
     with st.expander("➕ Aggiungi un farmaco"):
@@ -1427,3 +1436,4 @@ elif pagina == "👤 Profilo":
         value=st.session_state.get("auto_ref", False),
     )
     st.session_state["auto_ref"] = auto
+   

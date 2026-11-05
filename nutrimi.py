@@ -728,7 +728,7 @@ elif pagina == "📊 Oggi":
                 st.write(f"- Ferro: {n.get('ferro', 0):.1f} mg")
 
                 st.markdown("---")
-                st.markdown("**✏️ Modifica ingredienti e porzione**")
+                st.markdown("**✏️ Modifica il piatto**")
                 vol_old = float(vol_fin or 0)
                 cons_old = float(qta_cons or 0)
                 if vol_old > 0 and cons_old > 0:
@@ -738,8 +738,19 @@ elif pagina == "📊 Oggi":
                     ingr_attuali = {
                         k: float(v) for k, v in info.get("ingredienti", {}).items()
                     }
+                    # Bozza delle modifiche: si applica solo con "Aggiorna piatto"
+                    rimossi = st.session_state.setdefault(f"rimossi_{base_key}", [])
+                    aggiunti = st.session_state.setdefault(f"aggiunti_{base_key}", [])
+                    st.caption(
+                        "Cambia le quantità, togli o aggiungi ingredienti: le"
+                        " modifiche valgono solo dopo aver toccato «Aggiorna piatto»."
+                    )
+
                     nuove_qta = {}
                     for ing, qta in ingr_attuali.items():
+                        if ing in rimossi:
+                            nuove_qta[ing] = 0.0
+                            continue
                         nel_db = ing in db_att
                         q_nuova = st.number_input(
                             f"{ing} (g o ml)"
@@ -752,26 +763,76 @@ elif pagina == "📊 Oggi":
                             key=f"mod_ing_{base_key}_{ing}",
                         )
                         nuove_qta[ing] = float(q_nuova)
-                    # Il volume segue la variazione degli ingredienti (modificabile)
+                        if nel_db and st.button(
+                            f"✖ Togli {ing} dal piatto",
+                            key=f"togli_{base_key}_{ing}",
+                        ):
+                            rimossi.append(ing)
+                            st.rerun()
+
+                    for ing in list(rimossi):
+                        st.info(f"🚫 {ing}: tolto dal piatto")
+                        if st.button(f"↩️ Rimetti {ing}", key=f"rimetti_{base_key}_{ing}"):
+                            rimossi.remove(ing)
+                            st.rerun()
+
+                    for ing in list(aggiunti):
+                        q_add = st.number_input(
+                            f"{ing} — aggiunto (g o ml)",
+                            min_value=0.0,
+                            value=None,
+                            step=1.0,
+                            placeholder="0",
+                            key=f"add_q_{base_key}_{ing}",
+                        )
+                        nuove_qta[ing] = float(q_add) if q_add else 0.0
+                        if st.button(
+                            f"✖ Non aggiungere {ing}",
+                            key=f"no_add_{base_key}_{ing}",
+                        ):
+                            aggiunti.remove(ing)
+                            st.rerun()
+
+                    addn = st.session_state.get(f"addn_{base_key}", 0)
+                    candidati = [
+                        i for i in ingredienti_ordinati
+                        if i not in ingr_attuali and i not in aggiunti
+                    ]
+                    nuovo_ing = st.selectbox(
+                        "➕ Aggiungi un ingrediente non previsto",
+                        candidati,
+                        index=None,
+                        placeholder="Tocca per scegliere...",
+                        key=f"sel_add_{base_key}_{addn}",
+                    )
+                    if nuovo_ing:
+                        aggiunti.append(nuovo_ing)
+                        st.session_state[f"addn_{base_key}"] = addn + 1
+                        st.rerun()
+
+                    # Volume e porzione seguono gli ingredienti mantenendo la
+                    # stessa proporzione di prima (modificabili)
                     delta_ing = sum(
-                        nuove_qta[k] - ingr_attuali[k] for k in ingr_attuali
+                        nuove_qta[k] - ingr_attuali.get(k, 0.0) for k in nuove_qta
                     )
                     vol_proposto = max(vol_old + delta_ing, 1.0)
+                    cons_proposta = max(cons_old * vol_proposto / vol_old, 1.0)
+                    firma = f"{delta_ing:g}"
                     nuovo_vol = st.number_input(
                         "Volume totale preparato (ml)",
                         min_value=1.0, value=vol_proposto, step=10.0, format="%g",
-                        key=f"mod_vol_{base_key}_{delta_ing:g}",
+                        key=f"mod_vol_{base_key}_{firma}",
+                    )
+                    nuova_cons = st.number_input(
+                        "Quantità consumata (ml o g)",
+                        min_value=1.0, value=cons_proposta, step=10.0, format="%g",
+                        key=f"mod_cons_{base_key}_{firma}",
                     )
                     if abs(delta_ing) > 1e-9:
                         st.caption(
-                            f"Volume aggiornato di {delta_ing:+g} in base agli"
-                            " ingredienti: correggilo se serve."
+                            f"Volume e quantità consumata sono stati adeguati agli"
+                            f" ingredienti ({delta_ing:+g}): correggili se serve."
                         )
-                    nuova_cons = st.number_input(
-                        "Quantità consumata (ml o g)",
-                        min_value=1.0, value=cons_old, step=10.0, format="%g",
-                        key=f"mod_cons_{base_key}",
-                    )
                     if nuova_cons > nuovo_vol:
                         st.warning(
                             "La quantità consumata supera il volume preparato:"
@@ -780,8 +841,9 @@ elif pagina == "📊 Oggi":
                     nuovi_nutr = ricalcola_piatto(
                         info, nuove_qta, nuovo_vol, nuova_cons, db_att
                     )
+                    qta_finali = {k: q for k, q in nuove_qta.items() if q > 0}
                     cambiato = (
-                        nuove_qta != ingr_attuali
+                        qta_finali != {k: v for k, v in ingr_attuali.items() if v > 0}
                         or abs(nuovo_vol - vol_old) > 1e-9
                         or abs(nuova_cons - cons_old) > 1e-9
                     )
@@ -792,19 +854,19 @@ elif pagina == "📊 Oggi":
                             f" proteine {nuovi_nutr['prot']:.1f} g"
                         )
                     if st.button("💾 Aggiorna piatto", key=f"agg_{base_key}"):
-                        if not any(q > 0 for q in nuove_qta.values()):
+                        if not qta_finali:
                             st.warning(
                                 "Serve almeno un ingrediente con quantità maggiore"
                                 " di 0. Per eliminare il piatto usa Rimuovi."
                             )
                         elif nuovi_nutr:
-                            info["ingredienti"] = {
-                                k: q for k, q in nuove_qta.items() if q > 0
-                            }
+                            info["ingredienti"] = qta_finali
                             info["volume_finale"] = float(nuovo_vol)
                             info["quantita_consumata"] = float(nuova_cons)
                             info["nutrienti"] = nuovi_nutr
                             info["rev"] = rev + 1
+                            for nome_k in (f"rimossi_{base_key}", f"aggiunti_{base_key}", f"addn_{base_key}"):
+                                st.session_state.pop(nome_k, None)
                             salva_dati(dati_app)
                             st.rerun()
                 else:
@@ -1436,4 +1498,3 @@ elif pagina == "👤 Profilo":
         value=st.session_state.get("auto_ref", False),
     )
     st.session_state["auto_ref"] = auto
-   

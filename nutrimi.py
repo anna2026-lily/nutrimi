@@ -80,6 +80,9 @@ DATABASE_INIZIALE = {
     for nome, valori in DB_RAW.items()
 }
 
+NOMI_TURNI = ["Anna", "Luigi", "Lucia"]
+GIORNI_IT = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
+
 MOMENTI_FARMACI = ["Mattina", "Pranzo", "Sera", "Notte", "Al bisogno"]
 ICONE_MOMENTI = {
     "Mattina": "🌅", "Pranzo": "☀️", "Sera": "🌆", "Notte": "🌙",
@@ -215,6 +218,7 @@ def carica_dati():
 
     dati = json.loads(testo)
     dati.setdefault("ricette", {})
+    dati.setdefault("turni", {})
     # Il database alimenti parte da quello iniziale; poi si modifica solo
     # dall'app (così un alimento eliminato non ricompare)
     if not dati.get("database"):
@@ -522,7 +526,7 @@ if _prec is not None and _prec != utente_selezionato:
 st.session_state["profilo_precedente"] = utente_selezionato
 
 PAGINE = [
-    "🍳 Pasto", "💊 Farmaci", "📊 Oggi", "🩺 Vitali", "📈 Medie",
+    "🍳 Pasto", "💊 Farmaci", "📅 Turni", "📊 Oggi", "🩺 Vitali", "📈 Medie",
     "🥕 Alimenti", "📄 Esporta", "👤 Profilo",
 ]
 pagina = st.radio(
@@ -1088,6 +1092,98 @@ elif pagina == "💊 Farmaci":
             elif st.button("🗑️ Elimina farmaco", key=f"btn_del_farm_{f['id']}"):
                 st.session_state["farm_da_eliminare"] = f["id"]
                 st.rerun()
+
+# ==========================================
+# PAGINA: TURNI (DISPONIBILITÀ SETTIMANALE)
+# ==========================================
+elif pagina == "📅 Turni":
+    st.subheader("Turni: disponibilità della settimana")
+    st.caption(
+        "Valgono per tutti, non dipendono dal profilo. 🟢 disponibile ·"
+        " 🔴 non disponibile · ⚪ non indicato."
+    )
+
+    oggi_it = ora_italiana().date()
+    giorno_scelto = st.date_input(
+        "Settimana che contiene il giorno", value=oggi_it, key="turni_data"
+    )
+    lunedi = giorno_scelto - timedelta(days=giorno_scelto.weekday())
+    giorni_sett = [lunedi + timedelta(days=i) for i in range(7)]
+    st.markdown(
+        f"**Settimana dal {giorni_sett[0]:%d/%m} al {giorni_sett[-1]:%d/%m/%Y}**"
+    )
+
+    # --- Quadro riassuntivo a colori ---
+    turni = dati_app.get("turni", {})
+    intest = "".join(
+        f'<th style="padding:6px">{n}</th>' for n in NOMI_TURNI
+    )
+    righe_html = ""
+    for g in giorni_sett:
+        stato_g = turni.get(str(g), {})
+        celle = ""
+        liberi = 0
+        for nome in NOMI_TURNI:
+            v = stato_g.get(nome)
+            if v == "verde":
+                sfondo, simbolo = "#2e9e4f", "✔"
+                liberi += 1
+            elif v == "rosso":
+                sfondo, simbolo = "#d64545", "✖"
+            else:
+                sfondo, simbolo = "#6b7280", "–"
+            celle += (
+                f'<td style="background:{sfondo};color:white;font-size:1.3rem;'
+                f'padding:10px 4px;border:2px solid #0e1117">{simbolo}</td>'
+            )
+        segno = "📍 " if g == oggi_it else ""
+        righe_html += (
+            f'<tr><td style="text-align:left;padding:6px 8px;white-space:nowrap">'
+            f'{segno}<b>{GIORNI_IT[g.weekday()]}</b> {g:%d/%m}</td>{celle}'
+            f'<td style="padding:6px">{liberi}</td></tr>'
+        )
+    st.markdown(
+        '<table style="width:100%;border-collapse:collapse;text-align:center">'
+        f'<tr><th></th>{intest}<th style="padding:6px">🟢</th></tr>'
+        f"{righe_html}</table>",
+        unsafe_allow_html=True,
+    )
+    st.caption("L'ultima colonna indica quante persone sono disponibili quel giorno.")
+
+    # --- Inserimento della propria disponibilità ---
+    st.markdown("---")
+    st.markdown("**Inserisci la tua disponibilità**")
+    if "turni_chi" not in st.session_state:
+        iniziale_chi = st.session_state.get("turni_chi_val") or st.query_params.get("chi")
+        st.session_state["turni_chi"] = (
+            iniziale_chi if iniziale_chi in NOMI_TURNI else NOMI_TURNI[0]
+        )
+    chi = st.radio("Chi sei?", NOMI_TURNI, horizontal=True, key="turni_chi")
+    st.session_state["turni_chi_val"] = chi
+    st.query_params["chi"] = chi
+
+    st.caption(
+        "Tocca un giorno per cambiare: ⚪ → 🟢 → 🔴 → ⚪."
+    )
+    EMOJI_STATO = {None: "⚪", "verde": "🟢", "rosso": "🔴"}
+    SUCCESSIVO = {None: "verde", "verde": "rosso", "rosso": None}
+    for g in giorni_sett:
+        corrente = turni.get(str(g), {}).get(chi)
+        etichetta = f"{EMOJI_STATO[corrente]}  {GIORNI_IT[g.weekday()]} {g:%d/%m}"
+        if st.button(etichetta, key=f"turno_{chi}_{g}"):
+            # rileggo i dati aggiornati, così non sovrascrivo i tocchi degli altri
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            giorno_t = d_fresco.setdefault("turni", {}).setdefault(str(g), {})
+            nuovo = SUCCESSIVO[giorno_t.get(chi)]
+            if nuovo is None:
+                giorno_t.pop(chi, None)
+            else:
+                giorno_t[chi] = nuovo
+            if not giorno_t:
+                d_fresco["turni"].pop(str(g), None)
+            salva_dati(d_fresco)
+            st.rerun()
 
 # ==========================================
 # PAGINA: VITALI

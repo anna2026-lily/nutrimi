@@ -1069,21 +1069,24 @@ elif pagina == "💊 Farmaci":
 
             st.markdown("**🗑️ Elimina questo farmaco**")
             st.caption("Sparisce dall'elenco e dalle spunte dei giorni passati.")
-            conf_f = st.checkbox(
-                f"Confermo di voler eliminare '{f['nome']}' ({f['momento']})",
-                key=f"conf_del_farm_{f['id']}",
-            )
-            if st.button(
-                "🗑️ Elimina farmaco",
-                disabled=not conf_f,
-                key=f"btn_del_farm_{f['id']}",
-            ):
-                dati_utente["farmaci"] = [x for x in elenco if x["id"] != f["id"]]
-                for giorno in dati_utente["farmaci_assunti"].values():
-                    giorno.pop(f["id"], None)
-                salva_dati(dati_app)
-                st.session_state["msg_farm"] = f"Farmaco '{f['nome']}' eliminato."
-                st.session_state["farm_sel_n"] = n_f + 1
+            if st.session_state.get("farm_da_eliminare") == f["id"]:
+                st.warning(
+                    f"Eliminare definitivamente **{f['nome']}** ({f['momento']})?"
+                )
+                if st.button("✅ Sì, elimina", key=f"si_del_farm_{f['id']}"):
+                    dati_utente["farmaci"] = [x for x in elenco if x["id"] != f["id"]]
+                    for giorno in dati_utente["farmaci_assunti"].values():
+                        giorno.pop(f["id"], None)
+                    salva_dati(dati_app)
+                    st.session_state.pop("farm_da_eliminare", None)
+                    st.session_state["msg_farm"] = f"Farmaco '{f['nome']}' eliminato."
+                    st.session_state["farm_sel_n"] = n_f + 1
+                    st.rerun()
+                if st.button("↩️ No, annulla", key=f"no_del_farm_{f['id']}"):
+                    st.session_state.pop("farm_da_eliminare", None)
+                    st.rerun()
+            elif st.button("🗑️ Elimina farmaco", key=f"btn_del_farm_{f['id']}"):
+                st.session_state["farm_da_eliminare"] = f["id"]
                 st.rerun()
 
 # ==========================================
@@ -1270,19 +1273,20 @@ elif pagina == "🥕 Alimenti":
                 st.rerun()
 
         st.markdown("**🗑️ Elimina questo alimento**")
-        conferma_ing = st.checkbox(
-            f"Confermo di voler eliminare '{scelto}'",
-            key=f"conf_del_ing_{scelto}",
-        )
-        if st.button(
-            "🗑️ Elimina alimento",
-            disabled=not conferma_ing,
-            key=f"btn_del_ing_{scelto}",
-        ):
-            del dati_app["database"][scelto]
-            salva_dati(dati_app)
-            st.session_state["msg_ing"] = f"Alimento '{scelto}' eliminato."
-            st.session_state["ing_sel_n"] = n_sel + 1
+        if st.session_state.get("ing_da_eliminare") == scelto:
+            st.warning(f"Eliminare definitivamente **{scelto}** dal database?")
+            if st.button("✅ Sì, elimina", key=f"si_del_ing_{scelto}"):
+                del dati_app["database"][scelto]
+                salva_dati(dati_app)
+                st.session_state.pop("ing_da_eliminare", None)
+                st.session_state["msg_ing"] = f"Alimento '{scelto}' eliminato."
+                st.session_state["ing_sel_n"] = n_sel + 1
+                st.rerun()
+            if st.button("↩️ No, annulla", key=f"no_del_ing_{scelto}"):
+                st.session_state.pop("ing_da_eliminare", None)
+                st.rerun()
+        elif st.button("🗑️ Elimina alimento", key=f"btn_del_ing_{scelto}"):
+            st.session_state["ing_da_eliminare"] = scelto
             st.rerun()
 
     st.markdown("---")

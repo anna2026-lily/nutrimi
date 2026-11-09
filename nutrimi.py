@@ -219,6 +219,8 @@ def carica_dati():
     dati = json.loads(testo)
     dati.setdefault("ricette", {})
     dati.setdefault("turni", {})
+    dati.setdefault("alimenti_ok", {})
+    dati.setdefault("alimenti_note", {})
     # Il database alimenti parte da quello iniziale; poi si modifica solo
     # dall'app (così un alimento eliminato non ricompare)
     if not dati.get("database"):
@@ -526,7 +528,7 @@ if _prec is not None and _prec != utente_selezionato:
 st.session_state["profilo_precedente"] = utente_selezionato
 
 PAGINE = [
-    "🍳 Pasto", "💊 Farmaci", "📅 Turni", "📊 Oggi", "🩺 Vitali", "📈 Medie",
+    "🍳 Pasto", "💊 Farmaci", "📅 Turni", "✅ Lista", "📊 Oggi", "🩺 Vitali", "📈 Medie",
     "🥕 Alimenti", "📄 Esporta", "👤 Profilo",
 ]
 pagina = st.radio(
@@ -1184,6 +1186,163 @@ elif pagina == "📅 Turni":
                 d_fresco["turni"].pop(str(g), None)
             salva_dati(d_fresco)
             st.rerun()
+
+# ==========================================
+# PAGINA: LISTA ALIMENTI CONSENTITI / VIETATI
+# ==========================================
+elif pagina == "✅ Lista":
+    st.subheader("Alimenti: si possono dare?")
+    st.caption(
+        "Lista unica per tutti i profili. Tocca un alimento per cambiare:"
+        " grigio (da decidere), verde (si può dare), rosso (non si può dare)."
+        " Per cambiare un colore già scelto ti viene chiesta una conferma."
+    )
+
+    if "msg_lista" in st.session_state:
+        st.success(st.session_state.pop("msg_lista"))
+
+    lista = dati_app.setdefault("alimenti_ok", {})
+    note_lista = dati_app.setdefault("alimenti_note", {})
+    EMOJI_LISTA = {"grigio": "⚪", "verde": "🟢", "rosso": "🔴"}
+    NOME_STATO = {"grigio": "da decidere", "verde": "si può dare", "rosso": "NON si può dare"}
+
+    # --- Aggiunta di un alimento ---
+    n_nl = st.session_state.get("lista_nuovo_n", 0)
+    nuovo_nome = st.text_input(
+        "Scrivi il nome dell'alimento da aggiungere",
+        key=f"lista_nuovo_{n_nl}",
+    )
+    nuova_nota = st.text_input(
+        "Nota (facoltativa, es. crudo o cotto)",
+        key=f"lista_nuova_nota_{n_nl}",
+    )
+    if st.button("➕ Aggiungi alla lista"):
+        nome = nuovo_nome.strip()
+        if not nome:
+            st.warning("Scrivi prima il nome dell'alimento.")
+        elif any(k.lower() == nome.lower() for k in lista):
+            st.warning("Questo alimento è già nella lista.")
+        else:
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            d_fresco.setdefault("alimenti_ok", {})[nome] = "grigio"
+            if nuova_nota.strip():
+                d_fresco.setdefault("alimenti_note", {})[nome] = nuova_nota.strip()
+            salva_dati(d_fresco)
+            st.session_state["lista_nuovo_n"] = n_nl + 1
+            st.session_state["msg_lista"] = f"'{nome}' aggiunto alla lista."
+            st.rerun()
+
+    st.markdown("---")
+
+    if not lista:
+        st.info("La lista è vuota: aggiungi il primo alimento qui sopra.")
+    else:
+        cerca = st.text_input("🔍 Cerca nella lista", key="lista_cerca")
+        mostrati = sorted(
+            [n for n in lista if cerca.strip().lower() in n.lower()],
+            key=lambda x: x.lower(),
+        )
+        n_verdi = sum(1 for v in lista.values() if v == "verde")
+        n_rossi = sum(1 for v in lista.values() if v == "rosso")
+        st.caption(f"🟢 {n_verdi} permessi · 🔴 {n_rossi} vietati · totale {len(lista)}")
+
+        if "lista_cambio" not in st.session_state:
+            st.session_state["lista_cambio"] = None
+        if "lista_elimina" not in st.session_state:
+            st.session_state["lista_elimina"] = None
+
+        elimina_in_corso = st.session_state["lista_elimina"]
+        if elimina_in_corso and elimina_in_corso not in lista:
+            st.session_state["lista_elimina"] = None
+        elif elimina_in_corso and elimina_in_corso not in mostrati:
+            mostrati = sorted(mostrati + [elimina_in_corso], key=lambda x: x.lower())
+
+        for nome in mostrati:
+            stato = lista[nome]
+            cambio = st.session_state["lista_cambio"]
+            elimina = st.session_state["lista_elimina"]
+
+            if cambio and cambio[0] == nome:
+                # richiesta di conferma prima di cambiare un colore già scelto
+                nuovo_stato = cambio[1]
+                st.warning(
+                    f"**{nome}**: oggi è {EMOJI_LISTA[stato]} {NOME_STATO[stato]}."
+                    f" Vuoi cambiarlo in {EMOJI_LISTA[nuovo_stato]}"
+                    f" {NOME_STATO[nuovo_stato]}?"
+                )
+                if st.button(f"✅ Sì, cambia {nome}", key=f"lista_si_{nome}"):
+                    leggi_da_sheet.clear()
+                    d_fresco = carica_dati()
+                    d_fresco.setdefault("alimenti_ok", {})[nome] = nuovo_stato
+                    salva_dati(d_fresco)
+                    st.session_state["lista_cambio"] = None
+                    st.rerun()
+                if st.button("↩️ No, lascia com'è", key=f"lista_no_{nome}"):
+                    st.session_state["lista_cambio"] = None
+                    st.rerun()
+            elif elimina == nome:
+                st.warning(f"Eliminare **{nome}** dalla lista?")
+                if st.button(f"✅ Sì, elimina {nome}", key=f"lista_del_si_{nome}"):
+                    leggi_da_sheet.clear()
+                    d_fresco = carica_dati()
+                    d_fresco.setdefault("alimenti_ok", {}).pop(nome, None)
+                    d_fresco.setdefault("alimenti_note", {}).pop(nome, None)
+                    salva_dati(d_fresco)
+                    st.session_state["lista_elimina"] = None
+                    st.rerun()
+                if st.button("↩️ No, annulla", key=f"lista_del_no_{nome}"):
+                    st.session_state["lista_elimina"] = None
+                    st.rerun()
+            else:
+                if st.button(
+                    f"{EMOJI_LISTA[stato]}  {nome}"
+                    + (f" — {note_lista[nome]}" if note_lista.get(nome) else ""),
+                    key=f"lista_btn_{nome}",
+                    type="primary" if stato == "verde" else "secondary",
+                ):
+                    if stato == "grigio":
+                        # primo tocco: scelgo verde, senza conferma
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        d_fresco.setdefault("alimenti_ok", {})[nome] = "verde"
+                        salva_dati(d_fresco)
+                    else:
+                        # verde -> rosso, rosso -> verde: chiedo conferma
+                        altro = "rosso" if stato == "verde" else "verde"
+                        st.session_state["lista_cambio"] = (nome, altro)
+                    st.rerun()
+
+        with st.expander("✏️ Modifica la nota o elimina un alimento"):
+            n_sc = st.session_state.get("lista_sel_n", 0)
+            scelto_l = st.selectbox(
+                "Scegli l'alimento",
+                sorted(lista.keys(), key=lambda x: x.lower()),
+                index=None,
+                placeholder="Seleziona...",
+                key=f"lista_scelta_{n_sc}",
+            )
+            if scelto_l and scelto_l in lista:
+                nota_mod = st.text_input(
+                    "Nota (es. crudo o cotto)",
+                    value=note_lista.get(scelto_l, ""),
+                    key=f"lista_nota_{scelto_l}",
+                )
+                if st.button("💾 Salva nota", key=f"lista_salva_nota_{scelto_l}"):
+                    leggi_da_sheet.clear()
+                    d_fresco = carica_dati()
+                    note_f = d_fresco.setdefault("alimenti_note", {})
+                    if nota_mod.strip():
+                        note_f[scelto_l] = nota_mod.strip()
+                    else:
+                        note_f.pop(scelto_l, None)
+                    salva_dati(d_fresco)
+                    st.session_state["msg_lista"] = f"Nota di '{scelto_l}' salvata."
+                    st.session_state["lista_sel_n"] = n_sc + 1
+                    st.rerun()
+                if st.button("🗑️ Elimina dalla lista", key=f"lista_btn_elimina_{scelto_l}"):
+                    st.session_state["lista_elimina"] = scelto_l
+                    st.rerun()
 
 # ==========================================
 # PAGINA: VITALI

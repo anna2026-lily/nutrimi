@@ -221,6 +221,8 @@ def carica_dati():
     dati.setdefault("turni", {})
     dati.setdefault("alimenti_ok", {})
     dati.setdefault("alimenti_note", {})
+    dati.setdefault("ricettario", {})
+    dati.setdefault("menu_sett", {})
     # Il database alimenti parte da quello iniziale; poi si modifica solo
     # dall'app (così un alimento eliminato non ricompare)
     if not dati.get("database"):
@@ -528,9 +530,12 @@ if _prec is not None and _prec != utente_selezionato:
 st.session_state["profilo_precedente"] = utente_selezionato
 
 PAGINE = [
-    "🍳 Pasto", "💊 Farmaci", "📅 Turni", "✅ Lista", "📊 Oggi", "🩺 Vitali", "📈 Medie",
+    "🍳 Pasto", "💊 Farmaci", "📅 Turni", "✅ Lista", "🗓️ Menu", "📖 Ricette", "📊 Oggi", "🩺 Vitali", "📈 Medie",
     "🥕 Alimenti", "📄 Esporta", "👤 Profilo",
 ]
+# Collegamenti tra pagine (es. dal menu settimanale alla ricetta)
+if "vai_a_pagina" in st.session_state:
+    st.session_state["pagina"] = st.session_state.pop("vai_a_pagina")
 pagina = st.radio(
     "Pagina", PAGINE, horizontal=True, key="pagina", label_visibility="collapsed"
 )
@@ -1155,21 +1160,23 @@ elif pagina == "📅 Turni":
     # --- Inserimento della propria disponibilità ---
     st.markdown("---")
     st.markdown("**Inserisci la tua disponibilità**")
-    if "turni_chi" not in st.session_state:
-        iniziale_chi = st.session_state.get("turni_chi_val") or st.query_params.get("chi")
-        st.session_state["turni_chi"] = (
-            iniziale_chi if iniziale_chi in NOMI_TURNI else NOMI_TURNI[0]
-        )
-    chi = st.radio("Chi sei?", NOMI_TURNI, horizontal=True, key="turni_chi")
-    st.session_state["turni_chi_val"] = chi
-    st.query_params["chi"] = chi
+    # Nessun nome preselezionato: ognuno sceglie il proprio dal proprio telefono
+    if "turni_chi" not in st.session_state and st.session_state.get("turni_chi_val") in NOMI_TURNI:
+        st.session_state["turni_chi"] = st.session_state["turni_chi_val"]
+    chi = st.radio(
+        "Chi sei?", NOMI_TURNI, horizontal=True, index=None, key="turni_chi"
+    )
+    if chi:
+        st.session_state["turni_chi_val"] = chi
+    else:
+        st.info("Scegli il tuo nome per inserire la tua disponibilità.")
 
     st.caption(
         "Tocca un giorno per cambiare: ⚪ → 🟢 → 🔴 → ⚪."
     )
     EMOJI_STATO = {None: "⚪", "verde": "🟢", "rosso": "🔴"}
     SUCCESSIVO = {None: "verde", "verde": "rosso", "rosso": None}
-    for g in giorni_sett:
+    for g in (giorni_sett if chi else []):
         corrente = turni.get(str(g), {}).get(chi)
         etichetta = f"{EMOJI_STATO[corrente]}  {GIORNI_IT[g.weekday()]} {g:%d/%m}"
         if st.button(etichetta, key=f"turno_{chi}_{g}"):
@@ -1188,23 +1195,50 @@ elif pagina == "📅 Turni":
             st.rerun()
 
 # ==========================================
-# PAGINA: LISTA ALIMENTI CONSENTITI / VIETATI
+# PAGINA: LISTA ALIMENTI A COLORI
 # ==========================================
 elif pagina == "✅ Lista":
-    st.subheader("Alimenti: si possono dare?")
+    import hashlib
+
+    st.subheader("Lista alimenti")
     st.caption(
-        "Lista unica per tutti i profili. Tocca un alimento per cambiare:"
-        " grigio (da decidere), verde (si può dare), rosso (non si può dare)."
-        " Per cambiare un colore già scelto ti viene chiesta una conferma."
+        "Lista unica per tutti i profili. Tocca un alimento per scegliere il"
+        " colore: verde, arancione o rosso. Grigio = non ancora attribuito."
+        " Prima di cambiare un colore già scelto ti viene chiesta una conferma."
     )
 
     if "msg_lista" in st.session_state:
         st.success(st.session_state.pop("msg_lista"))
 
+    # colore di sfondo e del testo per ogni stato
+    COLORI_LISTA = {
+        "grigio": ("#6b7280", "#ffffff"),
+        "verde": ("#23813f", "#ffffff"),
+        "arancione": ("#f59e0b", "#111111"),
+        "rosso": ("#c93a3a", "#ffffff"),
+    }
+    NOME_COLORE = {
+        "grigio": "Grigio", "verde": "Verde",
+        "arancione": "Arancione", "rosso": "Rosso",
+    }
+    SCELTE = ["verde", "arancione", "rosso"]
+
+    def id_sicuro(nome):
+        return hashlib.md5(nome.encode("utf-8")).hexdigest()[:8]
+
+    def regola_css(chiave, stato):
+        sfondo, testo = COLORI_LISTA[stato]
+        return (
+            f".st-key-{chiave} button, .st-key-{chiave} button:hover,"
+            f" .st-key-{chiave} button:focus, .st-key-{chiave} button:active"
+            f" {{ background-color: {sfondo} !important; border-color: {sfondo}"
+            f" !important; color: {testo} !important; }}"
+            f" .st-key-{chiave} button p {{ color: {testo} !important;"
+            f" font-weight: 600; }} "
+        )
+
     lista = dati_app.setdefault("alimenti_ok", {})
     note_lista = dati_app.setdefault("alimenti_note", {})
-    EMOJI_LISTA = {"grigio": "⚪", "verde": "🟢", "rosso": "🔴"}
-    NOME_STATO = {"grigio": "da decidere", "verde": "si può dare", "rosso": "NON si può dare"}
 
     # --- Aggiunta di un alimento ---
     n_nl = st.session_state.get("lista_nuovo_n", 0)
@@ -1243,47 +1277,58 @@ elif pagina == "✅ Lista":
             [n for n in lista if cerca.strip().lower() in n.lower()],
             key=lambda x: x.lower(),
         )
-        n_verdi = sum(1 for v in lista.values() if v == "verde")
-        n_rossi = sum(1 for v in lista.values() if v == "rosso")
-        st.caption(f"🟢 {n_verdi} permessi · 🔴 {n_rossi} vietati · totale {len(lista)}")
+        conteggi = {c: 0 for c in COLORI_LISTA}
+        for v in lista.values():
+            conteggi[v if v in COLORI_LISTA else "grigio"] += 1
+        st.caption(
+            f"🟢 {conteggi['verde']} · 🟠 {conteggi['arancione']}"
+            f" · 🔴 {conteggi['rosso']} · ⚪ {conteggi['grigio']}"
+            f" · totale {len(lista)}"
+        )
 
-        if "lista_cambio" not in st.session_state:
-            st.session_state["lista_cambio"] = None
-        if "lista_elimina" not in st.session_state:
-            st.session_state["lista_elimina"] = None
-
-        elimina_in_corso = st.session_state["lista_elimina"]
+        cambio = st.session_state.get("lista_cambio")
+        if isinstance(cambio, (tuple, list)):
+            cambio = cambio[0]
+        elimina_in_corso = st.session_state.get("lista_elimina")
         if elimina_in_corso and elimina_in_corso not in lista:
             st.session_state["lista_elimina"] = None
-        elif elimina_in_corso and elimina_in_corso not in mostrati:
-            mostrati = sorted(mostrati + [elimina_in_corso], key=lambda x: x.lower())
+            elimina_in_corso = None
+        for extra in (cambio, elimina_in_corso):
+            if extra and extra in lista and extra not in mostrati:
+                mostrati = sorted(mostrati + [extra], key=lambda x: x.lower())
 
+        css = ""
         for nome in mostrati:
-            stato = lista[nome]
-            cambio = st.session_state["lista_cambio"]
-            elimina = st.session_state["lista_elimina"]
+            stato = lista[nome] if lista[nome] in COLORI_LISTA else "grigio"
+            sid = id_sicuro(nome)
 
-            if cambio and cambio[0] == nome:
-                # richiesta di conferma prima di cambiare un colore già scelto
-                nuovo_stato = cambio[1]
-                st.warning(
-                    f"**{nome}**: oggi è {EMOJI_LISTA[stato]} {NOME_STATO[stato]}."
-                    f" Vuoi cambiarlo in {EMOJI_LISTA[nuovo_stato]}"
-                    f" {NOME_STATO[nuovo_stato]}?"
-                )
-                if st.button(f"✅ Sì, cambia {nome}", key=f"lista_si_{nome}"):
-                    leggi_da_sheet.clear()
-                    d_fresco = carica_dati()
-                    d_fresco.setdefault("alimenti_ok", {})[nome] = nuovo_stato
-                    salva_dati(d_fresco)
+            if cambio == nome:
+                # scelta del colore (con richiesta se ne ha già uno)
+                if stato == "grigio":
+                    st.info(f"Che colore vuoi dare a **{nome}**?")
+                else:
+                    st.warning(
+                        f"**{nome}** è {NOME_COLORE[stato].lower()}. Vuoi cambiarne"
+                        " il colore? Scegli il nuovo colore oppure annulla."
+                    )
+                for c in SCELTE:
+                    if c == stato:
+                        continue
+                    chiave_c = f"lista_sc_{c}_{sid}"
+                    css += regola_css(chiave_c, c)
+                    if st.button(NOME_COLORE[c], key=chiave_c):
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        d_fresco.setdefault("alimenti_ok", {})[nome] = c
+                        salva_dati(d_fresco)
+                        st.session_state["lista_cambio"] = None
+                        st.rerun()
+                if st.button("↩️ Annulla", key=f"lista_no_{sid}"):
                     st.session_state["lista_cambio"] = None
                     st.rerun()
-                if st.button("↩️ No, lascia com'è", key=f"lista_no_{nome}"):
-                    st.session_state["lista_cambio"] = None
-                    st.rerun()
-            elif elimina == nome:
+            elif elimina_in_corso == nome:
                 st.warning(f"Eliminare **{nome}** dalla lista?")
-                if st.button(f"✅ Sì, elimina {nome}", key=f"lista_del_si_{nome}"):
+                if st.button(f"✅ Sì, elimina {nome}", key=f"lista_del_si_{sid}"):
                     leggi_da_sheet.clear()
                     d_fresco = carica_dati()
                     d_fresco.setdefault("alimenti_ok", {}).pop(nome, None)
@@ -1291,27 +1336,21 @@ elif pagina == "✅ Lista":
                     salva_dati(d_fresco)
                     st.session_state["lista_elimina"] = None
                     st.rerun()
-                if st.button("↩️ No, annulla", key=f"lista_del_no_{nome}"):
+                if st.button("↩️ No, annulla", key=f"lista_del_no_{sid}"):
                     st.session_state["lista_elimina"] = None
                     st.rerun()
             else:
-                if st.button(
-                    f"{EMOJI_LISTA[stato]}  {nome}"
-                    + (f" — {note_lista[nome]}" if note_lista.get(nome) else ""),
-                    key=f"lista_btn_{nome}",
-                    type="primary" if stato == "verde" else "secondary",
-                ):
-                    if stato == "grigio":
-                        # primo tocco: scelgo verde, senza conferma
-                        leggi_da_sheet.clear()
-                        d_fresco = carica_dati()
-                        d_fresco.setdefault("alimenti_ok", {})[nome] = "verde"
-                        salva_dati(d_fresco)
-                    else:
-                        # verde -> rosso, rosso -> verde: chiedo conferma
-                        altro = "rosso" if stato == "verde" else "verde"
-                        st.session_state["lista_cambio"] = (nome, altro)
+                chiave_b = f"lista_btn_{sid}"
+                css += regola_css(chiave_b, stato)
+                etichetta = f"⚫  {nome}" + (
+                    f" — {note_lista[nome]}" if note_lista.get(nome) else ""
+                )
+                if st.button(etichetta, key=chiave_b, use_container_width=True):
+                    st.session_state["lista_cambio"] = nome
                     st.rerun()
+
+        if css:
+            st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
 
         with st.expander("✏️ Modifica la nota o elimina un alimento"):
             n_sc = st.session_state.get("lista_sel_n", 0)
@@ -1343,6 +1382,252 @@ elif pagina == "✅ Lista":
                 if st.button("🗑️ Elimina dalla lista", key=f"lista_btn_elimina_{scelto_l}"):
                     st.session_state["lista_elimina"] = scelto_l
                     st.rerun()
+
+# ==========================================
+# PAGINA: MENU SETTIMANALE
+# ==========================================
+elif pagina == "🗓️ Menu":
+    st.subheader("Menu settimanale")
+    st.caption(
+        "Il menu si ripete ogni settimana ed è uguale per tutti i profili."
+        " Tocca un piatto per aprire la sua ricetta (📖)."
+    )
+    if "msg_menu" in st.session_state:
+        st.success(st.session_state.pop("msg_menu"))
+
+    menu = dati_app.setdefault("menu_sett", {})
+    ricettario = dati_app.setdefault("ricettario", {})
+    GIORNI_COMPLETI = [
+        "Lunedì", "Martedì", "Mercoledì", "Giovedì", "Venerdì", "Sabato", "Domenica",
+    ]
+    PASTI_MENU = ["Colazione", "Pranzo", "Cena"]
+    oggi_i = ora_italiana().date().weekday()
+
+    def trova_ricetta(nome):
+        for k in ricettario:
+            if k.lower() == nome.strip().lower():
+                return k
+        return None
+
+    def modifica_menu(giorno, pasto, funzione):
+        leggi_da_sheet.clear()
+        d = carica_dati()
+        voci = d.setdefault("menu_sett", {}).setdefault(giorno, {}).setdefault(pasto, [])
+        funzione(voci)
+        salva_dati(d)
+
+    # --- Modifica del menu ---
+    with st.expander("✏️ Modifica il menu"):
+        g_sel = st.selectbox("Giorno", GIORNI_COMPLETI, index=oggi_i, key="menu_g")
+        p_sel = st.selectbox("Pasto", PASTI_MENU, key="menu_p")
+        voci_sel = menu.get(g_sel, {}).get(p_sel, [])
+        st.markdown(f"**{g_sel} · {p_sel}**")
+        if not voci_sel:
+            st.caption("Ancora vuoto.")
+        togli = st.session_state.get("menu_togli")
+        for k, v in enumerate(voci_sel):
+            if togli == (g_sel, p_sel, v):
+                st.warning(f"Togliere **{v}** da {g_sel} · {p_sel}?")
+                if st.button("✅ Sì, togli", key=f"menu_si_{k}"):
+                    modifica_menu(
+                        g_sel, p_sel,
+                        lambda vv, v=v: vv.remove(v) if v in vv else None,
+                    )
+                    st.session_state.pop("menu_togli", None)
+                    st.rerun()
+                if st.button("↩️ No, lascia", key=f"menu_no_{k}"):
+                    st.session_state.pop("menu_togli", None)
+                    st.rerun()
+            else:
+                st.write(f"• {v}")
+                if st.button(f"✖ Togli {v}", key=f"menu_x_{k}"):
+                    st.session_state["menu_togli"] = (g_sel, p_sel, v)
+                    st.rerun()
+
+        n_mn = st.session_state.get("menu_nuovo_n", 0)
+        nuovo_piatto = st.text_input(
+            "Aggiungi un piatto o alimento", key=f"menu_nuovo_{n_mn}"
+        )
+        if st.button("➕ Aggiungi al menu", key="menu_aggiungi"):
+            nome = nuovo_piatto.strip()
+            if not nome:
+                st.warning("Scrivi il nome del piatto.")
+            elif nome.lower() in [x.lower() for x in voci_sel]:
+                st.warning("È già presente in questo pasto.")
+            else:
+                modifica_menu(g_sel, p_sel, lambda vv: vv.append(nome))
+                st.session_state["menu_nuovo_n"] = n_mn + 1
+                st.session_state["msg_menu"] = f"'{nome}' aggiunto a {g_sel} · {p_sel}."
+                st.rerun()
+        da_ric = st.selectbox(
+            "Oppure scegli da una ricetta",
+            sorted(ricettario.keys(), key=lambda x: x.lower()),
+            index=None,
+            placeholder="Seleziona...",
+            key=f"menu_da_ric_{n_mn}",
+        )
+        if da_ric:
+            if da_ric.lower() in [x.lower() for x in voci_sel]:
+                st.warning("È già presente in questo pasto.")
+            else:
+                modifica_menu(g_sel, p_sel, lambda vv: vv.append(da_ric))
+                st.session_state["menu_nuovo_n"] = n_mn + 1
+                st.session_state["msg_menu"] = f"'{da_ric}' aggiunto a {g_sel} · {p_sel}."
+                st.rerun()
+
+    # --- Giorni della settimana ---
+    for i, giorno in enumerate(GIORNI_COMPLETI):
+        with st.expander(("📍 " if i == oggi_i else "") + giorno, expanded=(i == oggi_i)):
+            for pasto in PASTI_MENU:
+                voci = menu.get(giorno, {}).get(pasto, [])
+                st.markdown(f"**{pasto}**")
+                if not voci:
+                    st.caption("—")
+                for k, voce in enumerate(voci):
+                    nome_r = trova_ricetta(voce)
+                    if st.button(
+                        ("📖 " if nome_r else "• ") + voce,
+                        key=f"menu_voce_{i}_{pasto}_{k}",
+                    ):
+                        # apro la ricetta (o la creazione, se non esiste ancora)
+                        st.session_state["torna_a"] = "🗓️ Menu"
+                        if nome_r:
+                            st.session_state["ricetta_scelta"] = nome_r
+                            st.session_state.pop("ricetta_nuova_nome", None)
+                        else:
+                            st.session_state["ricetta_scelta"] = None
+                            st.session_state["ricetta_nuova_nome"] = voce
+                            st.session_state["ric_nuova_n"] = st.session_state.get("ric_nuova_n", 0) + 1
+                        st.session_state["vai_a_pagina"] = "📖 Ricette"
+                        st.rerun()
+
+# ==========================================
+# PAGINA: RICETTE
+# ==========================================
+elif pagina == "📖 Ricette":
+    st.subheader("Ricette")
+    ricettario = dati_app.setdefault("ricettario", {})
+    if "msg_ric" in st.session_state:
+        st.success(st.session_state.pop("msg_ric"))
+
+    if st.session_state.get("torna_a"):
+        if st.button("⬅️ Torna al menu settimanale"):
+            st.session_state["vai_a_pagina"] = st.session_state.pop("torna_a")
+            st.rerun()
+
+    nomi = sorted(ricettario.keys(), key=lambda x: x.lower())
+    pred = st.session_state.get("ricetta_scelta")
+    n_rs = st.session_state.get("ric_sel_n", 0)
+    if not nomi:
+        st.info("Non c'è ancora nessuna ricetta: creane una qui sotto.")
+    scelta = st.selectbox(
+        "Scegli una ricetta",
+        nomi,
+        index=nomi.index(pred) if pred in nomi else None,
+        placeholder="Seleziona una ricetta...",
+        key=f"ric_sel_{n_rs}_{pred}",
+    ) if nomi else None
+
+    if scelta and scelta in ricettario:
+        r = ricettario[scelta]
+        st.markdown(f"### {scelta}")
+        if r.get("ingredienti"):
+            st.markdown("**Ingredienti**")
+            st.markdown(r["ingredienti"].replace("\n", "  \n"))
+        if r.get("preparazione"):
+            st.markdown("**Preparazione**")
+            st.markdown(r["preparazione"].replace("\n", "  \n"))
+
+        with st.expander("✏️ Modifica o elimina questa ricetta"):
+            nome_m = st.text_input("Nome", value=scelta, key=f"ric_nome_{scelta}")
+            ing_m = st.text_area(
+                "Ingredienti (uno per riga)", value=r.get("ingredienti", ""),
+                key=f"ric_ing_{scelta}",
+            )
+            prep_m = st.text_area(
+                "Preparazione", value=r.get("preparazione", ""), height=220,
+                key=f"ric_prep_{scelta}",
+            )
+            if st.button("💾 Salva modifiche", key=f"ric_salva_{scelta}"):
+                nome_n = nome_m.strip()
+                altri = {k.lower() for k in ricettario if k != scelta}
+                if not nome_n:
+                    st.warning("Il nome non può essere vuoto.")
+                elif nome_n.lower() in altri:
+                    st.warning("Esiste già una ricetta con questo nome.")
+                else:
+                    leggi_da_sheet.clear()
+                    d = carica_dati()
+                    ric = d.setdefault("ricettario", {})
+                    ric.pop(scelta, None)
+                    ric[nome_n] = {
+                        "ingredienti": ing_m.strip(),
+                        "preparazione": prep_m.strip(),
+                    }
+                    if nome_n != scelta:
+                        # aggiorno i piatti del menu che usavano il vecchio nome
+                        for giorno_m in d.get("menu_sett", {}).values():
+                            for voci_m in giorno_m.values():
+                                for kk, vv in enumerate(voci_m):
+                                    if vv.lower() == scelta.lower():
+                                        voci_m[kk] = nome_n
+                    salva_dati(d)
+                    st.session_state["ricetta_scelta"] = nome_n
+                    st.session_state["ric_sel_n"] = n_rs + 1
+                    st.session_state["msg_ric"] = f"Ricetta '{nome_n}' salvata."
+                    st.rerun()
+
+            if st.session_state.get("ric_da_eliminare") == scelta:
+                st.warning(f"Eliminare definitivamente la ricetta **{scelta}**?")
+                if st.button("✅ Sì, elimina", key=f"ric_si_del_{scelta}"):
+                    leggi_da_sheet.clear()
+                    d = carica_dati()
+                    d.setdefault("ricettario", {}).pop(scelta, None)
+                    salva_dati(d)
+                    st.session_state.pop("ric_da_eliminare", None)
+                    st.session_state["ricetta_scelta"] = None
+                    st.session_state["ric_sel_n"] = n_rs + 1
+                    st.session_state["msg_ric"] = f"Ricetta '{scelta}' eliminata."
+                    st.rerun()
+                if st.button("↩️ No, annulla", key=f"ric_no_del_{scelta}"):
+                    st.session_state.pop("ric_da_eliminare", None)
+                    st.rerun()
+            elif st.button("🗑️ Elimina ricetta", key=f"ric_del_{scelta}"):
+                st.session_state["ric_da_eliminare"] = scelta
+                st.rerun()
+
+    st.markdown("---")
+    prefill = st.session_state.get("ricetta_nuova_nome", "")
+    n_nr = st.session_state.get("ric_nuova_n", 0)
+    if prefill:
+        st.info(f"Per «{prefill}» non c'è ancora una ricetta: puoi scriverla qui sotto.")
+    with st.expander("➕ Nuova ricetta", expanded=bool(prefill) or not nomi):
+        nome_nr = st.text_input(
+            "Nome della ricetta (es. Brodo vegetale)", value=prefill,
+            key=f"ric_n_nome_{n_nr}",
+        )
+        ing_nr = st.text_area("Ingredienti (uno per riga)", key=f"ric_n_ing_{n_nr}")
+        prep_nr = st.text_area("Preparazione", height=220, key=f"ric_n_prep_{n_nr}")
+        if st.button("💾 Salva ricetta", key="ric_n_salva"):
+            nome = nome_nr.strip()
+            if not nome:
+                st.warning("Scrivi il nome della ricetta.")
+            elif any(k.lower() == nome.lower() for k in ricettario):
+                st.warning("Esiste già una ricetta con questo nome.")
+            else:
+                leggi_da_sheet.clear()
+                d = carica_dati()
+                d.setdefault("ricettario", {})[nome] = {
+                    "ingredienti": ing_nr.strip(),
+                    "preparazione": prep_nr.strip(),
+                }
+                salva_dati(d)
+                st.session_state.pop("ricetta_nuova_nome", None)
+                st.session_state["ric_nuova_n"] = n_nr + 1
+                st.session_state["ricetta_scelta"] = nome
+                st.session_state["ric_sel_n"] = n_rs + 1
+                st.session_state["msg_ric"] = f"Ricetta '{nome}' salvata."
+                st.rerun()
 
 # ==========================================
 # PAGINA: VITALI

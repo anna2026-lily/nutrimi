@@ -1390,6 +1390,7 @@ elif pagina == "🗓️ Menu":
     st.subheader("Menu settimanale")
     st.caption(
         "Il menu si ripete ogni settimana ed è uguale per tutti i profili."
+        " Apri un giorno: sotto ogni pasto puoi scrivere un piatto da aggiungere."
         " Tocca un piatto per aprire la sua ricetta (📖)."
     )
     if "msg_menu" in st.session_state:
@@ -1417,7 +1418,7 @@ elif pagina == "🗓️ Menu":
         salva_dati(d)
 
     # --- Modifica del menu ---
-    with st.expander("✏️ Modifica il menu"):
+    with st.expander("✏️ Togli un piatto o aggiungi da una ricetta"):
         g_sel = st.selectbox("Giorno", GIORNI_COMPLETI, index=oggi_i, key="menu_g")
         p_sel = st.selectbox("Pasto", PASTI_MENU, key="menu_p")
         voci_sel = menu.get(g_sel, {}).get(p_sel, [])
@@ -1445,22 +1446,8 @@ elif pagina == "🗓️ Menu":
                     st.rerun()
 
         n_mn = st.session_state.get("menu_nuovo_n", 0)
-        nuovo_piatto = st.text_input(
-            "Aggiungi un piatto o alimento", key=f"menu_nuovo_{n_mn}"
-        )
-        if st.button("➕ Aggiungi al menu", key="menu_aggiungi"):
-            nome = nuovo_piatto.strip()
-            if not nome:
-                st.warning("Scrivi il nome del piatto.")
-            elif nome.lower() in [x.lower() for x in voci_sel]:
-                st.warning("È già presente in questo pasto.")
-            else:
-                modifica_menu(g_sel, p_sel, lambda vv: vv.append(nome))
-                st.session_state["menu_nuovo_n"] = n_mn + 1
-                st.session_state["msg_menu"] = f"'{nome}' aggiunto a {g_sel} · {p_sel}."
-                st.rerun()
         da_ric = st.selectbox(
-            "Oppure scegli da una ricetta",
+            "Aggiungi da una ricetta",
             sorted(ricettario.keys(), key=lambda x: x.lower()),
             index=None,
             placeholder="Seleziona...",
@@ -1499,6 +1486,24 @@ elif pagina == "🗓️ Menu":
                             st.session_state["ricetta_nuova_nome"] = voce
                             st.session_state["ric_nuova_n"] = st.session_state.get("ric_nuova_n", 0) + 1
                         st.session_state["vai_a_pagina"] = "📖 Ricette"
+                        st.rerun()
+
+                with st.form(f"menu_form_{i}_{pasto}", clear_on_submit=True):
+                    nuovo_txt = st.text_input(
+                        f"Scrivi un piatto da aggiungere a {pasto}",
+                        placeholder=f"Scrivi qui cosa aggiungere a {pasto}...",
+                        key=f"menu_txt_{i}_{pasto}",
+                    )
+                    invia_m = st.form_submit_button(f"➕ Aggiungi a {pasto}")
+                if invia_m:
+                    nome = nuovo_txt.strip()
+                    if not nome:
+                        st.warning("Scrivi prima il nome del piatto.")
+                    elif nome.lower() in [x.lower() for x in voci]:
+                        st.warning("È già presente in questo pasto.")
+                    else:
+                        modifica_menu(giorno, pasto, lambda vv, nome=nome: vv.append(nome))
+                        st.session_state["msg_menu"] = f"'{nome}' aggiunto a {giorno} · {pasto}."
                         st.rerun()
 
 # ==========================================

@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import io
 import json
 import uuid
@@ -160,6 +161,7 @@ def nuovo_utente():
         "parametri_vitali": {},
         "farmaci": [],
         "farmaci_assunti": {},
+        "note_pasti": {},
     }
 
 
@@ -236,6 +238,7 @@ def carica_dati():
         u.setdefault("parametri_vitali", {})
         u.setdefault("farmaci", [])
         u.setdefault("farmaci_assunti", {})
+        u.setdefault("note_pasti", {})
         obiettivi = u.setdefault("obiettivi", dict(DEFAULT_OBIETTIVI))
         for k, v in DEFAULT_OBIETTIVI.items():
             obiettivi.setdefault(k, v)
@@ -316,7 +319,7 @@ def genera_csv_vitali(vitali, d_da, d_a):
     w.writerow([
         "Data", "Sistolica mattina", "Diastolica mattina", "Pulsazioni mattina",
         "Sistolica sera", "Diastolica sera", "Pulsazioni sera", "Saturazione SpO2 (%)",
-        "Temperatura (°C)", "Evacuazioni (n.)", "Note evacuazione",
+        "Temperatura (°C)", "Evacuazioni (n.)", "Note evacuazione", "Pipì (n.)",
     ])
     for g in giorni_periodo(d_da, d_a):
         v = vitali.get(str(g))
@@ -327,6 +330,7 @@ def genera_csv_vitali(vitali, d_da, d_a):
                 v.get("press_dia_s", 0), v.get("puls_s", 0), v.get("saturazione", 0),
                 num_it(v["temperatura"]) if v.get("temperatura") else "",
                 v.get("evacuazioni", ""), v.get("evacuazione_note", ""),
+                v.get("pipi", ""),
             ])
     return out.getvalue().encode("utf-8-sig")
 
@@ -408,7 +412,7 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
 
     # --- Parametri vitali ---
     el.append(Paragraph("Parametri vitali", sezione))
-    righe = [["Data", "Press. mattina", "Polso", "Press. sera", "Polso", "SpO2", "Temp.", "Evac."]]
+    righe = [["Data", "Press. mattina", "Polso", "Press. sera", "Polso", "SpO2", "Temp.", "Evac.", "Pipì"]]
     note_evac = []
     for g in giorni:
         v = vitali.get(str(g))
@@ -429,9 +433,10 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
             f"{v.get('saturazione')}%" if v.get("saturazione") else "-",
             f"{num_it(v['temperatura'])} °C" if v.get("temperatura") else "-",
             v.get("evacuazioni") if "evacuazioni" in v else "-",
+            v.get("pipi") if "pipi" in v else "-",
         ])
     if len(righe) > 1:
-        t = Table(righe, colWidths=[2.4 * cm, 3 * cm, 1.5 * cm, 3 * cm, 1.5 * cm, 1.8 * cm, 2.2 * cm, 1.6 * cm], repeatRows=1)
+        t = Table(righe, colWidths=[2.2 * cm, 2.7 * cm, 1.4 * cm, 2.7 * cm, 1.4 * cm, 1.7 * cm, 2.1 * cm, 1.5 * cm, 1.4 * cm], repeatRows=1)
         t.setStyle(TableStyle(stile_tab))
         el.append(t)
         if note_evac:
@@ -697,6 +702,42 @@ elif pagina == "📊 Oggi":
     )
     data_str = str(data_scelta)
     piatti_oggi = registro_utente.get(data_str, {})
+
+    # --- Note del giorno (colazione, pranzo, cena...) ---
+    PASTI_NOTE = ["Colazione", "Pranzo", "Cena", "Spuntino"]
+    if "msg_note" in st.session_state:
+        st.success(st.session_state.pop("msg_note"))
+    note_giorno = dati_utente.get("note_pasti", {}).get(data_str, {})
+    with st.expander(
+        "📝 Note del giorno (colazione, pranzo, cena...)",
+        expanded=bool(note_giorno),
+    ):
+        with st.form(f"form_note_{utente_selezionato}_{data_str}"):
+            nuove_note = {}
+            for pasto_n in PASTI_NOTE:
+                salvata = note_giorno.get(pasto_n, "")
+                firma_n = hashlib.md5(salvata.encode("utf-8")).hexdigest()[:6]
+                nuove_note[pasto_n] = st.text_area(
+                    f"Nota per {pasto_n.lower()}",
+                    value=salvata,
+                    height=80,
+                    key=f"nota_{utente_selezionato}_{data_str}_{pasto_n}_{firma_n}",
+                )
+            salva_note = st.form_submit_button("💾 Salva note")
+        if salva_note:
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            u_fresco = d_fresco["utenti"].get(utente_selezionato)
+            if u_fresco is not None:
+                note_f = u_fresco.setdefault("note_pasti", {})
+                da_salvare = {k: v.strip() for k, v in nuove_note.items() if v.strip()}
+                if da_salvare:
+                    note_f[data_str] = da_salvare
+                else:
+                    note_f.pop(data_str, None)
+                salva_dati(d_fresco)
+                st.session_state["msg_note"] = f"Note del {data_str} salvate."
+                st.rerun()
 
     if not piatti_oggi:
         st.info("Nessun piatto registrato per questa data.")
@@ -1657,6 +1698,7 @@ elif pagina == "🩺 Vitali":
         st.session_state["temp_val"] = float(vit_giorno.get("temperatura", 0.0))
         st.session_state["evac_n"] = int(vit_giorno.get("evacuazioni", 0))
         st.session_state["evac_note"] = str(vit_giorno.get("evacuazione_note", ""))
+        st.session_state["pipi_n"] = int(vit_giorno.get("pipi", 0))
 
     st.markdown("**🔴 Pressione mattina**")
     p_sys_m = st.number_input("Sistolica / Max (mmHg)", min_value=0, step=1, key="p_sys_m")
@@ -1685,6 +1727,11 @@ elif pagina == "🩺 Vitali":
     )
     evac_note = st.text_input("Note (aspetto, difficoltà...)", key="evac_note")
 
+    st.markdown("**💧 Pipì**")
+    pipi_n = st.number_input(
+        "Numero di pipì nella giornata", min_value=0, step=1, key="pipi_n"
+    )
+
     if st.button("💾 Salva parametri vitali"):
         parametri_vitali_utente[data_v_str] = {
             "press_sys_m": p_sys_m,
@@ -1697,6 +1744,7 @@ elif pagina == "🩺 Vitali":
             "temperatura": float(temp_val),
             "evacuazioni": int(evac_n),
             "evacuazione_note": evac_note.strip(),
+            "pipi": int(pipi_n),
         }
         salva_dati(dati_app)
         st.success("Parametri vitali salvati!")
@@ -1726,6 +1774,10 @@ elif pagina == "🩺 Vitali":
                 st.caption(f"Note: {v['evacuazione_note']}")
         else:
             st.metric("Evacuazioni", "Non registrate")
+        if "pipi" in v:
+            st.metric("Pipì", f"{int(v.get('pipi', 0))}")
+        else:
+            st.metric("Pipì", "Non registrate")
 
 # ==========================================
 # PAGINA: MEDIE

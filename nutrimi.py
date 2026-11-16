@@ -2,6 +2,7 @@ import csv
 import hashlib
 import io
 import json
+import re
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
@@ -288,19 +289,22 @@ def genera_csv_pasti(registro, d_da, d_a):
     out = io.StringIO()
     w = csv.writer(out, delimiter=";")
     w.writerow([
-        "Data", "Piatto", "Ingredienti", "Porzione consumata (ml/g)",
+        "Data", "Ora", "Piatto", "Ingredienti", "Porzione consumata (ml/g)",
         "Calorie (kcal)", "Proteine (g)", "Carboidrati (g)", "Grassi (g)",
         "Fibre (g)", "Liquidi (ml)", "Potassio (mg)", "Calcio (mg)",
         "Magnesio (mg)", "Ferro (mg)", "Sodio (mg)", "Fosforo (mg)", "Nota",
     ])
     for g in giorni_periodo(d_da, d_a):
-        for nome, info in registro.get(str(g), {}).items():
+        for nome, info in sorted(
+            registro.get(str(g), {}).items(),
+            key=lambda kv: kv[1].get("ora") or "99:99",
+        ):
             n = info.get("nutrienti", {})
             ingr = ", ".join(
                 f"{k} {q:g}" for k, q in info.get("ingredienti", {}).items() if q > 0
             )
             w.writerow([
-                it_data(g), nome, ingr,
+                it_data(g), info.get("ora", ""), nome, ingr,
                 num_it(info.get("quantita_consumata", 0), 0),
                 num_it(n.get("kcal", 0)), num_it(n.get("prot", 0)),
                 num_it(n.get("carb", 0)), num_it(n.get("grassi", 0)),
@@ -456,8 +460,11 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
         righe.append([
             it_data(g),
             Paragraph(escape(", ".join(
-                f"{n_p} ({i_p['nota']})" if i_p.get("nota") else n_p
-                for n_p, i_p in piatti.items()
+                (f"{i_p['ora']} " if i_p.get("ora") else "")
+                + (f"{n_p} ({i_p['nota']})" if i_p.get("nota") else n_p)
+                for n_p, i_p in sorted(
+                    piatti.items(), key=lambda kv: kv[1].get("ora") or "99:99"
+                )
             )), piccolo),
             num_it(t["kcal"], 0), num_it(t["prot"]), num_it(t["carb"]),
             num_it(t["grassi"]), num_it(t["acqua"], 0),
@@ -675,18 +682,24 @@ if pagina == "🍳 Pasto":
         ha_quantita = any(q > 0 for q in quantita_ingredienti.values())
         if nome_piatto.strip() and ha_quantita:
             registro_utente.setdefault(data_str, {})
-            registro_utente[data_str][nome_piatto.strip()] = {
+            voce_piatto = {
                 "ingredienti": quantita_ingredienti,
                 "nutrienti": preview_totali,
                 "volume_finale": volume_finale,
                 "quantita_consumata": quantita_consumata,
             }
+            ora_reg = ora_italiana()
+            if data_piatto == ora_reg.date():
+                voce_piatto["ora"] = ora_reg.strftime("%H:%M")
+            registro_utente[data_str][nome_piatto.strip()] = voce_piatto
             salva_dati(dati_app)
             st.session_state["reset_n"] = n_reset + 1
             st.session_state["ing_piatto"] = []
             st.session_state["msg_piatto"] = (
                 f"Piatto '{nome_piatto.strip()}' aggiunto per"
-                f" {utente_selezionato} nel giorno {data_str}!"
+                f" {utente_selezionato} nel giorno {data_str}"
+                + (f" alle {voce_piatto['ora']}" if voce_piatto.get("ora") else "")
+                + "!"
             )
             st.rerun()
         else:
@@ -700,6 +713,8 @@ if pagina == "🍳 Pasto":
 # ==========================================
 elif pagina == "📊 Oggi":
     st.subheader("Riepilogo della giornata")
+    if "toast_msg" in st.session_state:
+        st.toast(st.session_state.pop("toast_msg"))
 
     data_scelta = st.date_input(
         "Giornata", value=date.today(), key="data_giorno"
@@ -729,33 +744,69 @@ elif pagina == "📊 Oggi":
             )
 
         st.markdown("### 📋 Piatti")
-        for nome_p, info in list(piatti_oggi.items()):
-            with st.expander(f"🍽️ {nome_p}"):
+        for nome_p, info in sorted(
+            piatti_oggi.items(), key=lambda kv: kv[1].get("ora") or "99:99"
+        ):
+            with st.expander(
+                (f"🕒 {info['ora']} · " if info.get("ora") else "") + f"🍽️ {nome_p}"
+            ):
                 nota_att = info.get("nota", "")
-                firma_n = hashlib.md5(nota_att.encode("utf-8")).hexdigest()[:6]
+                ora_att = info.get("ora", "")
+                firma_n = hashlib.md5(
+                    (nota_att + "|" + ora_att).encode("utf-8")
+                ).hexdigest()[:6]
                 with st.form(f"form_nota_{utente_selezionato}_{data_str}_{nome_p}"):
+                    ora_n = st.text_input(
+                        "🕒 Orario (es. 14:30)",
+                        value=ora_att,
+                        placeholder="es. 14:30",
+                        key=f"ora_p_{utente_selezionato}_{data_str}_{nome_p}_{firma_n}",
+                    )
                     nota_n = st.text_area(
                         "📝 Nota per questo pasto",
                         value=nota_att,
                         height=80,
                         key=f"nota_p_{utente_selezionato}_{data_str}_{nome_p}_{firma_n}",
                     )
-                    salva_n = st.form_submit_button("💾 Salva nota")
+                    salva_n = st.form_submit_button("💾 Salva nota e orario")
                 if salva_n:
-                    leggi_da_sheet.clear()
-                    d_fresco = carica_dati()
-                    u_fresco = d_fresco["utenti"].get(utente_selezionato)
-                    piatto_f = (
-                        u_fresco["registro"].get(data_str, {}).get(nome_p)
-                        if u_fresco else None
-                    )
-                    if piatto_f is not None:
-                        if nota_n.strip():
-                            piatto_f["nota"] = nota_n.strip()
+                    ora_txt = ora_n.strip().replace(".", ":")
+                    ora_ok = ""
+                    orario_valido = True
+                    if ora_txt:
+                        m_ora = re.fullmatch(r"(\d{1,2}):(\d{2})", ora_txt)
+                        if m_ora and int(m_ora.group(1)) < 24 and int(m_ora.group(2)) < 60:
+                            ora_ok = f"{int(m_ora.group(1)):02d}:{m_ora.group(2)}"
                         else:
-                            piatto_f.pop("nota", None)
-                        salva_dati(d_fresco)
-                        st.rerun()
+                            orario_valido = False
+                    if not orario_valido:
+                        st.error("Orario non valido: scrivi ad esempio 14:30.")
+                    else:
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                        piatto_f = (
+                            u_fresco["registro"].get(data_str, {}).get(nome_p)
+                            if u_fresco else None
+                        )
+                        if piatto_f is not None:
+                            if nota_n.strip():
+                                piatto_f["nota"] = nota_n.strip()
+                            else:
+                                piatto_f.pop("nota", None)
+                            if ora_ok:
+                                piatto_f["ora"] = ora_ok
+                            else:
+                                piatto_f.pop("ora", None)
+                            st.session_state["toast_msg"] = f"✅ Salvato per «{nome_p}»"
+                            salva_dati(d_fresco)
+                            st.rerun()
+                        else:
+                            st.error(
+                                "Non trovo più questo piatto: ricarica la pagina e riprova."
+                            )
+                if nota_att:
+                    st.success(f"✔️ Nota salvata: {nota_att}")
                 vol_fin = info.get("volume_finale")
                 qta_cons = info.get("quantita_consumata")
                 if vol_fin and qta_cons:

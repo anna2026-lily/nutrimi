@@ -366,7 +366,7 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
     el.append(Paragraph(
         f"<b>Paziente:</b> {escape(nome)} &nbsp;&nbsp; "
         f"<b>Periodo:</b> {it_data(d_da)} - {it_data(d_a)} &nbsp;&nbsp; "
-        f"<b>Generato il:</b> {it_data(date.today())}", normale))
+        f"<b>Generato il:</b> {it_data(ora_italiana().date())}", normale))
     el.append(Paragraph(
         f"Sesso: {escape(str(anagrafica.get('sesso', '-')))}, "
         f"età: {anagrafica.get('eta', '-')} anni, "
@@ -585,7 +585,7 @@ if pagina == "🍳 Pasto":
         "Nome del piatto (es. Brodo vegetale)", key=f"inp_nome_piatto_{n_reset}"
     )
     data_piatto = st.date_input(
-        "Data del pasto", value=date.today(), key="inp_data_piatto"
+        "Data del pasto", value=ora_italiana().date(), key="inp_data_piatto"
     )
     data_str = str(data_piatto)
 
@@ -717,7 +717,7 @@ elif pagina == "📊 Oggi":
         st.toast(st.session_state.pop("toast_msg"))
 
     data_scelta = st.date_input(
-        "Giornata", value=date.today(), key="data_giorno"
+        "Giornata", value=ora_italiana().date(), key="data_giorno"
     )
     data_str = str(data_scelta)
     piatti_oggi = registro_utente.get(data_str, {})
@@ -751,60 +751,36 @@ elif pagina == "📊 Oggi":
                 (f"🕒 {info['ora']} · " if info.get("ora") else "") + f"🍽️ {nome_p}"
             ):
                 nota_att = info.get("nota", "")
-                ora_att = info.get("ora", "")
-                firma_n = hashlib.md5(
-                    (nota_att + "|" + ora_att).encode("utf-8")
-                ).hexdigest()[:6]
+                firma_n = hashlib.md5(nota_att.encode("utf-8")).hexdigest()[:6]
                 with st.form(f"form_nota_{utente_selezionato}_{data_str}_{nome_p}"):
-                    ora_n = st.text_input(
-                        "🕒 Orario (es. 14:30)",
-                        value=ora_att,
-                        placeholder="es. 14:30",
-                        key=f"ora_p_{utente_selezionato}_{data_str}_{nome_p}_{firma_n}",
-                    )
                     nota_n = st.text_area(
                         "📝 Nota per questo pasto",
                         value=nota_att,
                         height=80,
                         key=f"nota_p_{utente_selezionato}_{data_str}_{nome_p}_{firma_n}",
                     )
-                    salva_n = st.form_submit_button("💾 Salva nota e orario")
+                    salva_n = st.form_submit_button("💾 Salva nota")
                 if salva_n:
-                    ora_txt = ora_n.strip().replace(".", ":")
-                    ora_ok = ""
-                    orario_valido = True
-                    if ora_txt:
-                        m_ora = re.fullmatch(r"(\d{1,2}):(\d{2})", ora_txt)
-                        if m_ora and int(m_ora.group(1)) < 24 and int(m_ora.group(2)) < 60:
-                            ora_ok = f"{int(m_ora.group(1)):02d}:{m_ora.group(2)}"
+                    leggi_da_sheet.clear()
+                    d_fresco = carica_dati()
+                    u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                    piatto_f = (
+                        u_fresco["registro"].get(data_str, {}).get(nome_p)
+                        if u_fresco else None
+                    )
+                    if piatto_f is not None:
+                        if nota_n.strip():
+                            piatto_f["nota"] = nota_n.strip()
+                            st.session_state["toast_msg"] = f"✅ Nota salvata per «{nome_p}»"
                         else:
-                            orario_valido = False
-                    if not orario_valido:
-                        st.error("Orario non valido: scrivi ad esempio 14:30.")
+                            piatto_f.pop("nota", None)
+                            st.session_state["toast_msg"] = f"Nota tolta da «{nome_p}»"
+                        salva_dati(d_fresco)
+                        st.rerun()
                     else:
-                        leggi_da_sheet.clear()
-                        d_fresco = carica_dati()
-                        u_fresco = d_fresco["utenti"].get(utente_selezionato)
-                        piatto_f = (
-                            u_fresco["registro"].get(data_str, {}).get(nome_p)
-                            if u_fresco else None
+                        st.error(
+                            "Non trovo più questo piatto: ricarica la pagina e riprova."
                         )
-                        if piatto_f is not None:
-                            if nota_n.strip():
-                                piatto_f["nota"] = nota_n.strip()
-                            else:
-                                piatto_f.pop("nota", None)
-                            if ora_ok:
-                                piatto_f["ora"] = ora_ok
-                            else:
-                                piatto_f.pop("ora", None)
-                            st.session_state["toast_msg"] = f"✅ Salvato per «{nome_p}»"
-                            salva_dati(d_fresco)
-                            st.rerun()
-                        else:
-                            st.error(
-                                "Non trovo più questo piatto: ricarica la pagina e riprova."
-                            )
                 if nota_att:
                     st.success(f"✔️ Nota salvata: {nota_att}")
                 vol_fin = info.get("volume_finale")
@@ -1029,7 +1005,7 @@ elif pagina == "💊 Farmaci":
     if "msg_farm" in st.session_state:
         st.success(st.session_state.pop("msg_farm"))
 
-    data_f = st.date_input("Giornata", value=date.today(), key="data_farmaci")
+    data_f = st.date_input("Giornata", value=ora_italiana().date(), key="data_farmaci")
     data_f_str = str(data_f)
     elenco = dati_utente["farmaci"]
     assunti_g = dati_utente["farmaci_assunti"].get(data_f_str, {})
@@ -1727,7 +1703,7 @@ elif pagina == "📖 Ricette":
 elif pagina == "🩺 Vitali":
     st.subheader("Parametri vitali")
 
-    data_v = st.date_input("Giornata", value=date.today(), key="data_vitali")
+    data_v = st.date_input("Giornata", value=ora_italiana().date(), key="data_vitali")
     data_v_str = str(data_v)
     vit_giorno = parametri_vitali_utente.get(data_v_str, {})
 
@@ -1834,7 +1810,7 @@ elif pagina == "📈 Medie":
     def calcola_media_periodo(giorni_indietro):
         somma_tot = {k: 0.0 for k in CHIAVI}
         giorni_validi = 0
-        oggi = date.today()
+        oggi = ora_italiana().date()
         for i in range(giorni_indietro):
             d_str = str(oggi - timedelta(days=i))
             if registro_utente.get(d_str):
@@ -1968,7 +1944,7 @@ elif pagina == "📄 Esporta":
         " riepilogo da stampare o inviare."
     )
 
-    oggi = date.today()
+    oggi = ora_italiana().date()
     d_da = st.date_input("Dal", value=oggi - timedelta(days=30), key="exp_da")
     d_a = st.date_input("Al", value=oggi, key="exp_a")
 

@@ -291,7 +291,7 @@ def genera_csv_pasti(registro, d_da, d_a):
         "Data", "Piatto", "Ingredienti", "Porzione consumata (ml/g)",
         "Calorie (kcal)", "Proteine (g)", "Carboidrati (g)", "Grassi (g)",
         "Fibre (g)", "Liquidi (ml)", "Potassio (mg)", "Calcio (mg)",
-        "Magnesio (mg)", "Ferro (mg)", "Sodio (mg)", "Fosforo (mg)",
+        "Magnesio (mg)", "Ferro (mg)", "Sodio (mg)", "Fosforo (mg)", "Nota",
     ])
     for g in giorni_periodo(d_da, d_a):
         for nome, info in registro.get(str(g), {}).items():
@@ -308,6 +308,7 @@ def genera_csv_pasti(registro, d_da, d_a):
                 num_it(n.get("potassio", 0)), num_it(n.get("calcio", 0)),
                 num_it(n.get("magnesio", 0)), num_it(n.get("ferro", 0)),
                 num_it(n.get("sodio", 0)), num_it(n.get("fosforo", 0)),
+                info.get("nota", ""),
             ])
     # utf-8-sig: Excel mostra correttamente le lettere accentate
     return out.getvalue().encode("utf-8-sig")
@@ -454,7 +455,10 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
         t = calcola_totali_giorno(piatti)
         righe.append([
             it_data(g),
-            Paragraph(escape(", ".join(piatti.keys())), piccolo),
+            Paragraph(escape(", ".join(
+                f"{n_p} ({i_p['nota']})" if i_p.get("nota") else n_p
+                for n_p, i_p in piatti.items()
+            )), piccolo),
             num_it(t["kcal"], 0), num_it(t["prot"]), num_it(t["carb"]),
             num_it(t["grassi"]), num_it(t["acqua"], 0),
         ])
@@ -703,42 +707,6 @@ elif pagina == "📊 Oggi":
     data_str = str(data_scelta)
     piatti_oggi = registro_utente.get(data_str, {})
 
-    # --- Note del giorno (colazione, pranzo, cena...) ---
-    PASTI_NOTE = ["Colazione", "Pranzo", "Cena", "Spuntino"]
-    if "msg_note" in st.session_state:
-        st.success(st.session_state.pop("msg_note"))
-    note_giorno = dati_utente.get("note_pasti", {}).get(data_str, {})
-    with st.expander(
-        "📝 Note del giorno (colazione, pranzo, cena...)",
-        expanded=bool(note_giorno),
-    ):
-        with st.form(f"form_note_{utente_selezionato}_{data_str}"):
-            nuove_note = {}
-            for pasto_n in PASTI_NOTE:
-                salvata = note_giorno.get(pasto_n, "")
-                firma_n = hashlib.md5(salvata.encode("utf-8")).hexdigest()[:6]
-                nuove_note[pasto_n] = st.text_area(
-                    f"Nota per {pasto_n.lower()}",
-                    value=salvata,
-                    height=80,
-                    key=f"nota_{utente_selezionato}_{data_str}_{pasto_n}_{firma_n}",
-                )
-            salva_note = st.form_submit_button("💾 Salva note")
-        if salva_note:
-            leggi_da_sheet.clear()
-            d_fresco = carica_dati()
-            u_fresco = d_fresco["utenti"].get(utente_selezionato)
-            if u_fresco is not None:
-                note_f = u_fresco.setdefault("note_pasti", {})
-                da_salvare = {k: v.strip() for k, v in nuove_note.items() if v.strip()}
-                if da_salvare:
-                    note_f[data_str] = da_salvare
-                else:
-                    note_f.pop(data_str, None)
-                salva_dati(d_fresco)
-                st.session_state["msg_note"] = f"Note del {data_str} salvate."
-                st.rerun()
-
     if not piatti_oggi:
         st.info("Nessun piatto registrato per questa data.")
     else:
@@ -763,6 +731,31 @@ elif pagina == "📊 Oggi":
         st.markdown("### 📋 Piatti")
         for nome_p, info in list(piatti_oggi.items()):
             with st.expander(f"🍽️ {nome_p}"):
+                nota_att = info.get("nota", "")
+                firma_n = hashlib.md5(nota_att.encode("utf-8")).hexdigest()[:6]
+                with st.form(f"form_nota_{utente_selezionato}_{data_str}_{nome_p}"):
+                    nota_n = st.text_area(
+                        "📝 Nota per questo pasto",
+                        value=nota_att,
+                        height=80,
+                        key=f"nota_p_{utente_selezionato}_{data_str}_{nome_p}_{firma_n}",
+                    )
+                    salva_n = st.form_submit_button("💾 Salva nota")
+                if salva_n:
+                    leggi_da_sheet.clear()
+                    d_fresco = carica_dati()
+                    u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                    piatto_f = (
+                        u_fresco["registro"].get(data_str, {}).get(nome_p)
+                        if u_fresco else None
+                    )
+                    if piatto_f is not None:
+                        if nota_n.strip():
+                            piatto_f["nota"] = nota_n.strip()
+                        else:
+                            piatto_f.pop("nota", None)
+                        salva_dati(d_fresco)
+                        st.rerun()
                 vol_fin = info.get("volume_finale")
                 qta_cons = info.get("quantita_consumata")
                 if vol_fin and qta_cons:
@@ -934,6 +927,8 @@ elif pagina == "📊 Oggi":
                     del registro_utente[data_str][nome_p]
                     salva_dati(dati_app)
                     st.rerun()
+            if info.get("nota"):
+                st.caption(f"📝 {info['nota']}")
 
         st.markdown("### 🎯 Confronto con gli obiettivi")
 

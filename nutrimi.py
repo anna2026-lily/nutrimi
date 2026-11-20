@@ -269,6 +269,77 @@ def calcola_totali_giorno(piatti_giorno):
     return totali
 
 
+def somministrazioni(val):
+    """Somministrazioni di un farmaco in un giorno: [{'ora': 'HH:MM' o '', 'motivo': testo}].
+    Legge anche i vecchi valori salvati come semplice orario."""
+    if not val:
+        return []
+    if isinstance(val, list):
+        return list(val)
+    if isinstance(val, dict):
+        return [val]
+    return [{"ora": str(val), "motivo": ""}]
+
+
+def ora_assunzione(val):
+    elenco_s = somministrazioni(val)
+    return (elenco_s[-1].get("ora") or "") if elenco_s else ""
+
+
+def farmaco_visibile(f, giorno_str, assunti_giorno):
+    """Un farmaco compare nei giorni in cui era in terapia e in quelli in cui è
+    stato spuntato (così la storia dei giorni passati non si perde)."""
+    if f["id"] in assunti_giorno:
+        return True
+    inizio = f.get("inizio")   # primo giorno in terapia
+    fine = f.get("fine")       # primo giorno in cui NON è più in terapia
+    if inizio and giorno_str < inizio:
+        return False
+    if fine and giorno_str >= fine:
+        return False
+    return True
+
+
+def leggi_pressioni(v):
+    """Misurazioni di pressione di un giorno:
+    [{'ora': 'HH:MM' o '', 'momento': '', 'sys': n, 'dia': n, 'puls': n}].
+    Legge anche i vecchi campi mattina/sera salvati prima dell'elenco."""
+    if v.get("pressioni"):
+        return list(v["pressioni"])
+    lista = []
+    for suff, momento in (("m", "mattina"), ("s", "sera")):
+        sy, di = v.get(f"press_sys_{suff}", 0), v.get(f"press_dia_{suff}", 0)
+        if sy and di:
+            lista.append({
+                "ora": "", "momento": momento, "sys": int(sy), "dia": int(di),
+                "puls": int(v.get(f"puls_{suff}", 0) or 0),
+            })
+    return lista
+
+
+def testo_pressione(m):
+    t = f"{m['sys']}/{m['dia']}"
+    if m.get("puls"):
+        t += f" ({m['puls']} bpm)"
+    quando = m.get("ora") or m.get("momento")
+    return f"{quando}: {t}" if quando else t
+
+
+def leggi_glicemie(v):
+    """Misurazioni di glicemia di un giorno: [{'ora': 'HH:MM' o '', 'valore': n}]."""
+    return list(v.get("glicemie", []))
+
+
+def leggi_saturazioni(v):
+    """Misurazioni di saturazione di un giorno: [{'ora': 'HH:MM' o '', 'valore': n}].
+    Legge anche il vecchio valore singolo salvato prima dell'elenco."""
+    if v.get("saturazioni"):
+        return list(v["saturazioni"])
+    if v.get("saturazione"):
+        return [{"ora": "", "valore": int(v["saturazione"])}]
+    return []
+
+
 # ==========================================
 # ESPORTAZIONE PER IL MEDICO
 # ==========================================
@@ -322,17 +393,24 @@ def genera_csv_vitali(vitali, d_da, d_a):
     out = io.StringIO()
     w = csv.writer(out, delimiter=";")
     w.writerow([
-        "Data", "Sistolica mattina", "Diastolica mattina", "Pulsazioni mattina",
-        "Sistolica sera", "Diastolica sera", "Pulsazioni sera", "Saturazione SpO2 (%)",
+        "Data", "Pressione mmHg (ora: sist/diast, polso)",
+        "Saturazione SpO2 % (ora: valore)", "Glicemia mg/dL (ora: valore)",
         "Temperatura (°C)", "Evacuazioni (n.)", "Note evacuazione", "Pipì (n.)",
     ])
     for g in giorni_periodo(d_da, d_a):
         v = vitali.get(str(g))
         if v:
             w.writerow([
-                it_data(g), v.get("press_sys_m", 0), v.get("press_dia_m", 0),
-                v.get("puls_m", 0), v.get("press_sys_s", 0),
-                v.get("press_dia_s", 0), v.get("puls_s", 0), v.get("saturazione", 0),
+                it_data(g),
+                "; ".join(testo_pressione(m) for m in leggi_pressioni(v)),
+                "; ".join(
+                    f"{m['ora']}: {m['valore']}" if m.get("ora") else str(m["valore"])
+                    for m in leggi_saturazioni(v)
+                ),
+                "; ".join(
+                    f"{m['ora']}: {m['valore']}" if m.get("ora") else str(m["valore"])
+                    for m in leggi_glicemie(v)
+                ),
                 num_it(v["temperatura"]) if v.get("temperatura") else "",
                 v.get("evacuazioni", ""), v.get("evacuazione_note", ""),
                 v.get("pipi", ""),
@@ -417,7 +495,7 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
 
     # --- Parametri vitali ---
     el.append(Paragraph("Parametri vitali", sezione))
-    righe = [["Data", "Press. mattina", "Polso", "Press. sera", "Polso", "SpO2", "Temp.", "Evac.", "Pipì"]]
+    righe = [["Data", "Pressione", "SpO2", "Glicemia", "Temp.", "Evac.", "Pipì"]]
     note_evac = []
     for g in giorni:
         v = vitali.get(str(g))
@@ -426,22 +504,25 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
         if v.get("evacuazione_note"):
             note_evac.append(f"{it_data(g)}: {v['evacuazione_note']}")
 
-        def press(s, d):
-            return f"{s}/{d}" if s and d else "-"
-
         righe.append([
             it_data(g),
-            press(v.get("press_sys_m"), v.get("press_dia_m")),
-            v.get("puls_m") or "-",
-            press(v.get("press_sys_s"), v.get("press_dia_s")),
-            v.get("puls_s") or "-",
-            f"{v.get('saturazione')}%" if v.get("saturazione") else "-",
+            Paragraph(escape(" / ".join(
+                testo_pressione(m) for m in leggi_pressioni(v)
+            ) or "-"), piccolo),
+            Paragraph(escape(" / ".join(
+                f"{m['valore']}% ({m['ora']})" if m.get("ora") else f"{m['valore']}%"
+                for m in leggi_saturazioni(v)
+            ) or "-"), piccolo),
+            Paragraph(escape(" / ".join(
+                f"{m['valore']} ({m['ora']})" if m.get("ora") else f"{m['valore']}"
+                for m in leggi_glicemie(v)
+            ) or "-"), piccolo),
             f"{num_it(v['temperatura'])} °C" if v.get("temperatura") else "-",
             v.get("evacuazioni") if "evacuazioni" in v else "-",
             v.get("pipi") if "pipi" in v else "-",
         ])
     if len(righe) > 1:
-        t = Table(righe, colWidths=[2.2 * cm, 2.7 * cm, 1.4 * cm, 2.7 * cm, 1.4 * cm, 1.7 * cm, 2.1 * cm, 1.5 * cm, 1.4 * cm], repeatRows=1)
+        t = Table(righe, colWidths=[2.0 * cm, 5.2 * cm, 3.2 * cm, 3.0 * cm, 1.7 * cm, 1.0 * cm, 1.0 * cm], repeatRows=1)
         t.setStyle(TableStyle(stile_tab))
         el.append(t)
         if note_evac:
@@ -1010,10 +1091,14 @@ elif pagina == "💊 Farmaci":
     elenco = dati_utente["farmaci"]
     assunti_g = dati_utente["farmaci_assunti"].get(data_f_str, {})
 
-    if not elenco:
-        st.info("Non c'è ancora nessun farmaco: aggiungili qui sotto.")
+    visibili = [f for f in elenco if farmaco_visibile(f, data_f_str, assunti_g)]
+    if not visibili:
+        st.info(
+            "Nessun farmaco in terapia per questo giorno."
+            if elenco else "Non c'è ancora nessun farmaco: aggiungili qui sotto."
+        )
     else:
-        programmati = [f for f in elenco if f.get("momento") != "Al bisogno"]
+        programmati = [f for f in visibili if f.get("momento") != "Al bisogno"]
         n_prese = sum(1 for f in programmati if f["id"] in assunti_g)
         if programmati:
             if n_prese == len(programmati):
@@ -1030,15 +1115,81 @@ elif pagina == "💊 Farmaci":
             " devi toccarlo di nuovo e confermare."
         )
         for momento in MOMENTI_FARMACI:
-            gruppo = [f for f in elenco if f.get("momento") == momento]
+            gruppo = [f for f in visibili if f.get("momento") == momento]
             if not gruppo:
                 continue
             st.markdown(f"**{ICONE_MOMENTI[momento]} {momento}**")
             for f in gruppo:
+                if momento == "Al bisogno":
+                    # farmaco occasionale: ogni somministrazione ha ora e motivo
+                    nome_dose_p = f["nome"] + (f" — {f['dose']}" if f.get("dose") else "")
+                    chiave_p = f"{utente_selezionato}_{data_f_str}_{f['id']}"
+                    somm = somministrazioni(assunti_g.get(f["id"]))
+                    st.markdown(f"💊 **{nome_dose_p}**")
+                    if not somm:
+                        st.caption("Nessuna somministrazione in questo giorno.")
+                    for k_s, voce_s in enumerate(somm):
+                        st.write(
+                            f"✅ {voce_s.get('ora') or '—'} · motivo:"
+                            f" {voce_s.get('motivo') or '—'}"
+                        )
+                        id_togli = (utente_selezionato, data_f_str, f["id"], k_s)
+                        if st.session_state.get("prn_da_togliere") == id_togli:
+                            st.warning("Togliere questa somministrazione?")
+                            if st.button("✅ Sì, togli", key=f"prn_si_{chiave_p}_{k_s}"):
+                                leggi_da_sheet.clear()
+                                d_fresco = carica_dati()
+                                u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                                if u_fresco is not None:
+                                    giorno_p = u_fresco.setdefault("farmaci_assunti", {}).setdefault(data_f_str, {})
+                                    lista_p = somministrazioni(giorno_p.get(f["id"]))
+                                    if voce_s in lista_p:
+                                        lista_p.remove(voce_s)
+                                    if lista_p:
+                                        giorno_p[f["id"]] = lista_p
+                                    else:
+                                        giorno_p.pop(f["id"], None)
+                                    if not giorno_p:
+                                        u_fresco["farmaci_assunti"].pop(data_f_str, None)
+                                    salva_dati(d_fresco)
+                                st.session_state.pop("prn_da_togliere", None)
+                                st.rerun()
+                            if st.button("↩️ No, lascia", key=f"prn_no_{chiave_p}_{k_s}"):
+                                st.session_state.pop("prn_da_togliere", None)
+                                st.rerun()
+                        elif st.button("✖ Togli", key=f"prn_x_{chiave_p}_{k_s}"):
+                            st.session_state["prn_da_togliere"] = id_togli
+                            st.rerun()
+                    with st.form(f"form_prn_{chiave_p}", clear_on_submit=True):
+                        motivo_prn = st.text_input(
+                            "Motivo della somministrazione (obbligatorio)",
+                            placeholder="es. dolore, febbre...",
+                            key=f"prn_motivo_{chiave_p}",
+                        )
+                        invia_prn = st.form_submit_button("➕ Segna come somministrato")
+                    if invia_prn:
+                        if not motivo_prn.strip():
+                            st.warning("Scrivi il motivo della somministrazione.")
+                        else:
+                            adesso_p = ora_italiana()
+                            leggi_da_sheet.clear()
+                            d_fresco = carica_dati()
+                            u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                            if u_fresco is not None:
+                                giorno_p = u_fresco.setdefault("farmaci_assunti", {}).setdefault(data_f_str, {})
+                                lista_p = somministrazioni(giorno_p.get(f["id"]))
+                                lista_p.append({
+                                    "ora": adesso_p.strftime("%H:%M") if data_f == adesso_p.date() else "",
+                                    "motivo": motivo_prn.strip(),
+                                })
+                                giorno_p[f["id"]] = lista_p
+                                salva_dati(d_fresco)
+                                st.rerun()
+                    continue
                 presa = f["id"] in assunti_g
                 nome_dose = f["nome"] + (f" — {f['dose']}" if f.get("dose") else "")
                 if presa:
-                    etichetta = f"✅ {nome_dose} · assunto alle {assunti_g[f['id']]}"
+                    etichetta = f"✅ {nome_dose} · assunto alle {ora_assunzione(assunti_g[f['id']])}"
                 else:
                     etichetta = f"⬜ {nome_dose}"
                 chiave_f = f"{utente_selezionato}_{data_f_str}_{f['id']}"
@@ -1048,7 +1199,7 @@ elif pagina == "💊 Farmaci":
                     # Richiesta di conferma prima di annullare l'assunzione
                     st.warning(
                         f"Annullare l'assunzione di **{nome_dose}**"
-                        f" (segnata alle {assunti_g[f['id']]})?"
+                        f" (segnata alle {ora_assunzione(assunti_g[f['id']])})?"
                     )
                     if st.button("✅ Sì, annulla l'assunzione", key=f"si_{chiave_f}"):
                         giorno = dati_utente["farmaci_assunti"].setdefault(data_f_str, {})
@@ -1091,6 +1242,7 @@ elif pagina == "💊 Farmaci":
                 st.warning("Inserisci il nome del farmaco.")
             elif any(
                 x["nome"].lower() == nome.lower() and x["momento"] == momento_f
+                and not x.get("fine")
                 for x in elenco
             ):
                 st.warning("Questo farmaco è già presente per quel momento.")
@@ -1100,14 +1252,22 @@ elif pagina == "💊 Farmaci":
                     "nome": nome,
                     "dose": dose_f.strip(),
                     "momento": momento_f,
+                    "inizio": str(ora_italiana().date()),
                 })
                 salva_dati(dati_app)
                 st.session_state["msg_farm"] = f"Farmaco '{nome}' aggiunto ({momento_f})."
                 st.rerun()
 
-    with st.expander("✏️ Modifica o elimina un farmaco"):
+    with st.expander("✏️ Modifica, sospendi o elimina un farmaco"):
         n_f = st.session_state.get("farm_sel_n", 0)
-        voci = {f"{x['nome']} — {x['momento']}": x for x in elenco}
+
+        def etichetta_voce(x):
+            e = f"{x['nome']} — {x['momento']}"
+            if x.get("fine"):
+                e += f" · sospeso dal {x['fine'][8:10]}/{x['fine'][5:7]}"
+            return e
+
+        voci = {etichetta_voce(x): x for x in elenco}
         scelta = st.selectbox(
             "Scegli il farmaco",
             list(voci.keys()),
@@ -1131,6 +1291,7 @@ elif pagina == "💊 Farmaci":
                     x["id"] != f["id"]
                     and x["nome"].lower() == nome.lower()
                     and x["momento"] == momento_m
+                    and not x.get("fine")
                     for x in elenco
                 ):
                     st.warning("Esiste già questo farmaco per quel momento.")
@@ -1141,11 +1302,65 @@ elif pagina == "💊 Farmaci":
                     st.session_state["farm_sel_n"] = n_f + 1
                     st.rerun()
 
-            st.markdown("**🗑️ Elimina questo farmaco**")
-            st.caption("Sparisce dall'elenco e dalle spunte dei giorni passati.")
+            st.markdown("**⏹️ Sospendi (ha smesso di prenderlo)**")
+            if f.get("fine"):
+                st.info(
+                    f"Sospeso dal {f['fine']}: da quel giorno non compare più"
+                    " nell'elenco, mentre i giorni precedenti restano com'erano."
+                )
+                if st.button("↻ Riattiva da oggi", key=f"riattiva_{f['id']}"):
+                    elenco.append({
+                        "id": uuid.uuid4().hex[:10],
+                        "nome": f["nome"],
+                        "dose": f.get("dose", ""),
+                        "momento": f["momento"],
+                        "inizio": str(ora_italiana().date()),
+                    })
+                    salva_dati(dati_app)
+                    st.session_state["msg_farm"] = f"Farmaco '{f['nome']}' riattivato da oggi."
+                    st.session_state["farm_sel_n"] = n_f + 1
+                    st.rerun()
+            else:
+                st.caption(
+                    "Da quel giorno il farmaco non compare più nell'elenco; le"
+                    " assunzioni dei giorni precedenti restano salvate. Se oggi"
+                    " lo hai già dato, oggi resta visibile."
+                )
+                data_stop = st.date_input(
+                    "Sospeso a partire dal giorno",
+                    value=ora_italiana().date(),
+                    key=f"farm_fine_{f['id']}",
+                )
+                if st.session_state.get("farm_da_sospendere") == (f["id"], str(data_stop)):
+                    st.warning(
+                        f"Sospendere **{f['nome']}** ({f['momento']}) a partire dal"
+                        f" {data_stop}? I giorni precedenti non cambiano."
+                    )
+                    if st.button("✅ Sì, sospendi", key=f"si_stop_{f['id']}"):
+                        f["fine"] = str(data_stop)
+                        salva_dati(dati_app)
+                        st.session_state.pop("farm_da_sospendere", None)
+                        st.session_state["msg_farm"] = (
+                            f"Farmaco '{f['nome']}' sospeso dal {data_stop}."
+                        )
+                        st.session_state["farm_sel_n"] = n_f + 1
+                        st.rerun()
+                    if st.button("↩️ No, annulla", key=f"no_stop_{f['id']}"):
+                        st.session_state.pop("farm_da_sospendere", None)
+                        st.rerun()
+                elif st.button("⏹️ Sospendi il farmaco", key=f"btn_stop_{f['id']}"):
+                    st.session_state["farm_da_sospendere"] = (f["id"], str(data_stop))
+                    st.rerun()
+
+            st.markdown("**🗑️ Elimina del tutto questo farmaco**")
+            st.caption(
+                "Attenzione: cancella anche tutte le spunte dei giorni passati."
+                " Se ha solo smesso di prenderlo, usa «Sospendi»."
+            )
             if st.session_state.get("farm_da_eliminare") == f["id"]:
                 st.warning(
-                    f"Eliminare definitivamente **{f['nome']}** ({f['momento']})?"
+                    f"Eliminare definitivamente **{f['nome']}** ({f['momento']}) e tutta la"
+                    " sua storia? Se ha solo smesso di prenderlo, usa «Sospendi»."
                 )
                 if st.button("✅ Sì, elimina", key=f"si_del_farm_{f['id']}"):
                     dati_utente["farmaci"] = [x for x in elenco if x["id"] != f["id"]]
@@ -1702,6 +1917,8 @@ elif pagina == "📖 Ricette":
 # ==========================================
 elif pagina == "🩺 Vitali":
     st.subheader("Parametri vitali")
+    if "toast_msg_v" in st.session_state:
+        st.toast(st.session_state.pop("toast_msg_v"))
 
     data_v = st.date_input("Giornata", value=ora_italiana().date(), key="data_vitali")
     data_v_str = str(data_v)
@@ -1710,32 +1927,248 @@ elif pagina == "🩺 Vitali":
     chiave_vit = f"{utente_selezionato}|{data_v_str}"
     if st.session_state.get("chiave_vit_caricata") != chiave_vit or "temp_val" not in st.session_state:
         st.session_state["chiave_vit_caricata"] = chiave_vit
-        st.session_state["p_sys_m"] = int(vit_giorno.get("press_sys_m", 0))
-        st.session_state["p_dia_m"] = int(vit_giorno.get("press_dia_m", 0))
-        st.session_state["p_puls_m"] = int(vit_giorno.get("puls_m", 0))
-        st.session_state["p_sys_s"] = int(vit_giorno.get("press_sys_s", 0))
-        st.session_state["p_dia_s"] = int(vit_giorno.get("press_dia_s", 0))
-        st.session_state["p_puls_s"] = int(vit_giorno.get("puls_s", 0))
-        st.session_state["sat_val"] = int(vit_giorno.get("saturazione", 0))
         st.session_state["temp_val"] = float(vit_giorno.get("temperatura", 0.0))
         st.session_state["evac_n"] = int(vit_giorno.get("evacuazioni", 0))
         st.session_state["evac_note"] = str(vit_giorno.get("evacuazione_note", ""))
         st.session_state["pipi_n"] = int(vit_giorno.get("pipi", 0))
 
-    st.markdown("**🔴 Pressione mattina**")
-    p_sys_m = st.number_input("Sistolica / Max (mmHg)", min_value=0, step=1, key="p_sys_m")
-    p_dia_m = st.number_input("Diastolica / Min (mmHg)", min_value=0, step=1, key="p_dia_m")
-    p_puls_m = st.number_input("Pulsazioni (BPM)", min_value=0, step=1, key="p_puls_m")
+    st.markdown("**🔴 Pressione**")
+    misure_pr = leggi_pressioni(vit_giorno)
+    if misure_pr:
+        for m in misure_pr:
+            quando = m.get("ora") or m.get("momento") or "—"
+            riga = f"🕒 {quando} · **{m['sys']}/{m['dia']} mmHg**"
+            if m.get("puls"):
+                riga += f" · {m['puls']} BPM"
+            st.write(riga)
+    else:
+        st.caption("Nessuna misurazione registrata per questo giorno.")
+    n_pr = st.session_state.get("pr_nuova_n", 0)
+    sys_n = st.number_input(
+        "Sistolica / Max (mmHg)", min_value=0, max_value=300, step=1,
+        value=None, placeholder="es. 130", key=f"pr_sys_{n_pr}",
+    )
+    dia_n = st.number_input(
+        "Diastolica / Min (mmHg)", min_value=0, max_value=200, step=1,
+        value=None, placeholder="es. 80", key=f"pr_dia_{n_pr}",
+    )
+    puls_n = st.number_input(
+        "Pulsazioni (BPM), facoltativo", min_value=0, max_value=250, step=1,
+        value=None, placeholder="es. 72", key=f"pr_puls_{n_pr}",
+    )
+    if st.button("➕ Aggiungi pressione", key="pr_aggiungi"):
+        if not sys_n or not dia_n:
+            st.warning("Scrivi sia la sistolica sia la diastolica.")
+        else:
+            adesso_pr = ora_italiana()
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            u_fresco = d_fresco["utenti"].get(utente_selezionato)
+            if u_fresco is not None:
+                giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                lista_pr = leggi_pressioni(giorno_v)
+                lista_pr.append({
+                    "ora": adesso_pr.strftime("%H:%M") if data_v == adesso_pr.date() else "",
+                    "momento": "",
+                    "sys": int(sys_n),
+                    "dia": int(dia_n),
+                    "puls": int(puls_n) if puls_n else 0,
+                })
+                giorno_v["pressioni"] = lista_pr
+                for k_vecchio in ("press_sys_m", "press_dia_m", "puls_m",
+                                  "press_sys_s", "press_dia_s", "puls_s"):
+                    giorno_v.pop(k_vecchio, None)
+                salva_dati(d_fresco)
+                st.session_state["pr_nuova_n"] = n_pr + 1
+                st.session_state["toast_msg_v"] = f"✅ Pressione {int(sys_n)}/{int(dia_n)} aggiunta"
+                st.rerun()
 
-    st.markdown("**🌙 Pressione sera**")
-    p_sys_s = st.number_input("Sistolica / Max (mmHg) ", min_value=0, step=1, key="p_sys_s")
-    p_dia_s = st.number_input("Diastolica / Min (mmHg) ", min_value=0, step=1, key="p_dia_s")
-    p_puls_s = st.number_input("Pulsazioni (BPM) ", min_value=0, step=1, key="p_puls_s")
+    if misure_pr:
+        with st.expander("🗑️ Elimina una pressione sbagliata"):
+            opzioni_pr = [
+                f"{m.get('ora') or m.get('momento') or '—'} · {m['sys']}/{m['dia']} mmHg"
+                for m in misure_pr
+            ]
+            idx_pr = st.selectbox(
+                "Quale misurazione?",
+                list(range(len(opzioni_pr))),
+                format_func=lambda i: opzioni_pr[i],
+                index=None,
+                placeholder="Seleziona...",
+                key=f"pr_del_sel_{n_pr}",
+            )
+            if idx_pr is not None:
+                bersaglio_pr = misure_pr[idx_pr]
+                if st.session_state.get("pr_da_eliminare") == (data_v_str, idx_pr):
+                    st.warning(f"Eliminare la misurazione {opzioni_pr[idx_pr]}?")
+                    if st.button("✅ Sì, elimina", key="pr_si_del"):
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                        if u_fresco is not None:
+                            giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                            lista_pr = leggi_pressioni(giorno_v)
+                            if bersaglio_pr in lista_pr:
+                                lista_pr.remove(bersaglio_pr)
+                            giorno_v["pressioni"] = lista_pr
+                            for k_vecchio in ("press_sys_m", "press_dia_m", "puls_m",
+                                              "press_sys_s", "press_dia_s", "puls_s"):
+                                giorno_v.pop(k_vecchio, None)
+                            salva_dati(d_fresco)
+                        st.session_state.pop("pr_da_eliminare", None)
+                        st.session_state["pr_nuova_n"] = n_pr + 1
+                        st.rerun()
+                    if st.button("↩️ No, annulla", key="pr_no_del"):
+                        st.session_state.pop("pr_da_eliminare", None)
+                        st.rerun()
+                elif st.button("🗑️ Elimina misurazione", key="pr_del"):
+                    st.session_state["pr_da_eliminare"] = (data_v_str, idx_pr)
+                    st.rerun()
 
     st.markdown("**🫁 Saturazione ossigeno**")
-    sat_val = st.number_input(
-        "Saturazione (% SpO2)", min_value=0, max_value=100, step=1, key="sat_val"
+    misure_sat = leggi_saturazioni(vit_giorno)
+    if misure_sat:
+        for m in misure_sat:
+            riga = f"🕒 {m['ora'] or '—'} · **{m['valore']}%**"
+            if m["valore"] < 95:
+                riga += " ⚠️"
+            st.write(riga)
+    else:
+        st.caption("Nessuna misurazione registrata per questo giorno.")
+    n_sat = st.session_state.get("sat_nuova_n", 0)
+    nuova_sat = st.number_input(
+        "Nuova misurazione (% SpO2)",
+        min_value=0, max_value=100, step=1, value=None, placeholder="es. 96",
+        key=f"sat_nuova_{n_sat}",
     )
+    if st.button("➕ Aggiungi misurazione", key="sat_aggiungi"):
+        if not nuova_sat:
+            st.warning("Scrivi il valore della saturazione.")
+        else:
+            adesso_r = ora_italiana()
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            u_fresco = d_fresco["utenti"].get(utente_selezionato)
+            if u_fresco is not None:
+                giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                lista_s = leggi_saturazioni(giorno_v)
+                lista_s.append({
+                    "ora": adesso_r.strftime("%H:%M") if data_v == adesso_r.date() else "",
+                    "valore": int(nuova_sat),
+                })
+                giorno_v["saturazioni"] = lista_s
+                giorno_v.pop("saturazione", None)
+                salva_dati(d_fresco)
+                st.session_state["sat_nuova_n"] = n_sat + 1
+                st.session_state["toast_msg_v"] = f"✅ Saturazione {int(nuova_sat)}% aggiunta"
+                st.rerun()
+
+    if misure_sat:
+        with st.expander("🗑️ Elimina una misurazione sbagliata"):
+            opzioni = [f"{m['ora'] or '—'} · {m['valore']}%" for m in misure_sat]
+            idx_sel = st.selectbox(
+                "Quale misurazione?",
+                list(range(len(opzioni))),
+                format_func=lambda i: opzioni[i],
+                index=None,
+                placeholder="Seleziona...",
+                key=f"sat_del_sel_{n_sat}",
+            )
+            if idx_sel is not None:
+                bersaglio = misure_sat[idx_sel]
+                if st.session_state.get("sat_da_eliminare") == (data_v_str, idx_sel):
+                    st.warning(f"Eliminare la misurazione {opzioni[idx_sel]}?")
+                    if st.button("✅ Sì, elimina", key="sat_si_del"):
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                        if u_fresco is not None:
+                            giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                            lista_s = leggi_saturazioni(giorno_v)
+                            if bersaglio in lista_s:
+                                lista_s.remove(bersaglio)
+                            giorno_v["saturazioni"] = lista_s
+                            giorno_v.pop("saturazione", None)
+                            salva_dati(d_fresco)
+                        st.session_state.pop("sat_da_eliminare", None)
+                        st.session_state["sat_nuova_n"] = n_sat + 1
+                        st.rerun()
+                    if st.button("↩️ No, annulla", key="sat_no_del"):
+                        st.session_state.pop("sat_da_eliminare", None)
+                        st.rerun()
+                elif st.button("🗑️ Elimina misurazione", key="sat_del"):
+                    st.session_state["sat_da_eliminare"] = (data_v_str, idx_sel)
+                    st.rerun()
+
+    st.markdown("**🩸 Glicemia**")
+    misure_gli = leggi_glicemie(vit_giorno)
+    if misure_gli:
+        for m in misure_gli:
+            st.write(f"🕒 {m['ora'] or '—'} · **{m['valore']} mg/dL**")
+    else:
+        st.caption("Nessuna misurazione registrata per questo giorno.")
+    n_gli = st.session_state.get("gli_nuova_n", 0)
+    nuova_gli = st.number_input(
+        "Nuova misurazione (mg/dL)",
+        min_value=0, max_value=800, step=1, value=None, placeholder="es. 110",
+        key=f"gli_nuova_{n_gli}",
+    )
+    if st.button("➕ Aggiungi glicemia", key="gli_aggiungi"):
+        if not nuova_gli:
+            st.warning("Scrivi il valore della glicemia.")
+        else:
+            adesso_g = ora_italiana()
+            leggi_da_sheet.clear()
+            d_fresco = carica_dati()
+            u_fresco = d_fresco["utenti"].get(utente_selezionato)
+            if u_fresco is not None:
+                giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                lista_g = leggi_glicemie(giorno_v)
+                lista_g.append({
+                    "ora": adesso_g.strftime("%H:%M") if data_v == adesso_g.date() else "",
+                    "valore": int(nuova_gli),
+                })
+                giorno_v["glicemie"] = lista_g
+                salva_dati(d_fresco)
+                st.session_state["gli_nuova_n"] = n_gli + 1
+                st.session_state["toast_msg_v"] = f"✅ Glicemia {int(nuova_gli)} mg/dL aggiunta"
+                st.rerun()
+
+    if misure_gli:
+        with st.expander("🗑️ Elimina una glicemia sbagliata"):
+            opzioni_g = [f"{m['ora'] or '—'} · {m['valore']} mg/dL" for m in misure_gli]
+            idx_g = st.selectbox(
+                "Quale misurazione?",
+                list(range(len(opzioni_g))),
+                format_func=lambda i: opzioni_g[i],
+                index=None,
+                placeholder="Seleziona...",
+                key=f"gli_del_sel_{n_gli}",
+            )
+            if idx_g is not None:
+                bersaglio_g = misure_gli[idx_g]
+                if st.session_state.get("gli_da_eliminare") == (data_v_str, idx_g):
+                    st.warning(f"Eliminare la misurazione {opzioni_g[idx_g]}?")
+                    if st.button("✅ Sì, elimina", key="gli_si_del"):
+                        leggi_da_sheet.clear()
+                        d_fresco = carica_dati()
+                        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+                        if u_fresco is not None:
+                            giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+                            lista_g = leggi_glicemie(giorno_v)
+                            if bersaglio_g in lista_g:
+                                lista_g.remove(bersaglio_g)
+                            giorno_v["glicemie"] = lista_g
+                            salva_dati(d_fresco)
+                        st.session_state.pop("gli_da_eliminare", None)
+                        st.session_state["gli_nuova_n"] = n_gli + 1
+                        st.rerun()
+                    if st.button("↩️ No, annulla", key="gli_no_del"):
+                        st.session_state.pop("gli_da_eliminare", None)
+                        st.rerun()
+                elif st.button("🗑️ Elimina misurazione", key="gli_del"):
+                    st.session_state["gli_da_eliminare"] = (data_v_str, idx_g)
+                    st.rerun()
 
     st.markdown("**🌡️ Temperatura corporea**")
     temp_val = st.number_input(
@@ -1755,34 +2188,69 @@ elif pagina == "🩺 Vitali":
     )
 
     if st.button("💾 Salva parametri vitali"):
-        parametri_vitali_utente[data_v_str] = {
-            "press_sys_m": p_sys_m,
-            "press_dia_m": p_dia_m,
-            "puls_m": p_puls_m,
-            "press_sys_s": p_sys_s,
-            "press_dia_s": p_dia_s,
-            "puls_s": p_puls_s,
-            "saturazione": sat_val,
-            "temperatura": float(temp_val),
-            "evacuazioni": int(evac_n),
-            "evacuazione_note": evac_note.strip(),
-            "pipi": int(pipi_n),
-        }
-        salva_dati(dati_app)
-        st.success("Parametri vitali salvati!")
+        leggi_da_sheet.clear()
+        d_fresco = carica_dati()
+        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+        if u_fresco is not None:
+            giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+            giorno_v.update({
+                "temperatura": float(temp_val),
+                "evacuazioni": int(evac_n),
+                "evacuazione_note": evac_note.strip(),
+                "pipi": int(pipi_n),
+            })
+            salva_dati(d_fresco)
+            st.session_state["toast_msg_v"] = "✅ Parametri vitali salvati"
+            st.rerun()
 
     if data_v_str in parametri_vitali_utente:
         v = parametri_vitali_utente[data_v_str]
         st.markdown("---")
         st.markdown(f"**Salvati per il {data_v_str}:**")
-        sm, dm, pm = v.get("press_sys_m", 0), v.get("press_dia_m", 0), v.get("puls_m", 0)
-        ss, ds, ps = v.get("press_sys_s", 0), v.get("press_dia_s", 0), v.get("puls_s", 0)
-        sat = v.get("saturazione", 0)
-        st.metric("Pressione mattina", f"{sm}/{dm} mmHg" if sm > 0 and dm > 0 else "Non registrata", f"{pm} BPM" if pm > 0 else "")
-        st.metric("Pressione sera", f"{ss}/{ds} mmHg" if ss > 0 and ds > 0 else "Non registrata", f"{ps} BPM" if ps > 0 else "")
-        st.metric("Saturazione SpO2", f"{sat}%" if sat > 0 else "Non registrata")
-        if 0 < sat < 95:
-            st.error("⚠️ Attenzione: saturazione sotto il 95%")
+        misure_p = leggi_pressioni(v)
+        if misure_p:
+            ult_p = misure_p[-1]
+            st.metric(
+                "Pressione (ultima)",
+                f"{ult_p['sys']}/{ult_p['dia']} mmHg",
+                f"{ult_p['puls']} BPM" if ult_p.get("puls") else "",
+            )
+            quando_p = ult_p.get("ora") or ult_p.get("momento")
+            if quando_p:
+                st.caption(f"Ultima misurazione: {quando_p}")
+            if len(misure_p) > 1:
+                st.caption(f"{len(misure_p)} misurazioni nella giornata")
+        else:
+            st.metric("Pressione", "Non registrata")
+        misure_v = leggi_saturazioni(v)
+        if misure_v:
+            ultima = misure_v[-1]
+            st.metric("Saturazione SpO2 (ultima)", f"{ultima['valore']}%")
+            if ultima.get("ora"):
+                st.caption(f"Ultima misurazione alle {ultima['ora']}")
+            if len(misure_v) > 1:
+                st.caption(
+                    f"{len(misure_v)} misurazioni nella giornata · valore più basso"
+                    f" {min(m['valore'] for m in misure_v)}%"
+                )
+            if ultima["valore"] < 95:
+                st.error("⚠️ Attenzione: l'ultima saturazione è sotto il 95%")
+        else:
+            st.metric("Saturazione SpO2", "Non registrata")
+        misure_g = leggi_glicemie(v)
+        if misure_g:
+            ult_g = misure_g[-1]
+            st.metric("Glicemia (ultima)", f"{ult_g['valore']} mg/dL")
+            if ult_g.get("ora"):
+                st.caption(f"Ultima misurazione alle {ult_g['ora']}")
+            if len(misure_g) > 1:
+                st.caption(
+                    f"{len(misure_g)} misurazioni · minima"
+                    f" {min(m['valore'] for m in misure_g)} · massima"
+                    f" {max(m['valore'] for m in misure_g)} mg/dL"
+                )
+        else:
+            st.metric("Glicemia", "Non registrata")
         temp = float(v.get("temperatura", 0.0) or 0.0)
         st.metric(
             "Temperatura",

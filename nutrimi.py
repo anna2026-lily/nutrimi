@@ -1,3 +1,4 @@
+import copy
 import csv
 import hashlib
 import io
@@ -246,7 +247,43 @@ def carica_dati():
     return dati
 
 
+# Copia dei dati com'erano all'inizio di questa azione: serve a capire che cosa
+# ha cambiato la persona che sta salvando, senza cancellare ciò che hanno
+# salvato nel frattempo gli altri utilizzatori
+_RIF = {"app": None, "base": None}
+
+
+def applica_modifiche(base, mio, loro):
+    """Riporta su 'loro' (dati più recenti) solo le modifiche fatte da 'mio'
+    rispetto a 'base' (dati all'inizio dell'azione)."""
+    if isinstance(base, dict) and isinstance(mio, dict) and isinstance(loro, dict):
+        risultato = dict(loro)
+        for k in set(base) | set(mio):
+            if k not in mio:                      # tolto da me
+                risultato.pop(k, None)
+            elif k not in base:                   # aggiunto da me
+                if isinstance(mio[k], dict) and isinstance(loro.get(k), dict):
+                    # lo ha aggiunto anche un altro: unisco i due contenuti
+                    risultato[k] = applica_modifiche({}, mio[k], loro[k])
+                else:
+                    risultato[k] = mio[k]
+            elif base[k] != mio[k]:               # modificato da me
+                if isinstance(base[k], dict) and isinstance(mio[k], dict):
+                    risultato[k] = applica_modifiche(
+                        base[k], mio[k], loro.get(k, base[k])
+                    )
+                else:
+                    risultato[k] = mio[k]
+        return risultato
+    return mio
+
+
 def salva_dati(dati):
+    if _RIF.get("app") is dati and _RIF.get("base") is not None:
+        # dati letti all'inizio dell'azione: li unisco a quelli più recenti
+        leggi_da_sheet.clear()
+        dati = applica_modifiche(_RIF["base"], dati, carica_dati())
+    dati["ultimo_salvataggio"] = ora_italiana().strftime("%d/%m/%Y %H:%M")
     testo = json.dumps(dati, ensure_ascii=False, separators=(",", ":"))
     # Una cella di Google Sheets accetta max 50.000 caratteri: spezzo in blocchi
     pezzi = [testo[i:i + 40000] for i in range(0, len(testo), 40000)]
@@ -258,6 +295,8 @@ def salva_dati(dati):
     if righe_prima > len(pezzi):
         ws.batch_clear([f"A{len(pezzi) + 1}:A{righe_prima}"])
     leggi_da_sheet.clear()
+    if _RIF.get("app") is not None:
+        _RIF["base"] = copy.deepcopy(dati)
 
 
 def calcola_totali_giorno(piatti_giorno):
@@ -595,6 +634,8 @@ def ora_italiana():
 
 # Ad ogni azione rileggo i dati condivisi (cache di 5 secondi)
 dati_app = carica_dati()
+_RIF["app"] = dati_app
+_RIF["base"] = copy.deepcopy(dati_app)
 
 # ==========================================
 # INTESTAZIONE: PROFILO E MENU A PAGINE
@@ -625,6 +666,9 @@ if _prec is not None and _prec != utente_selezionato:
     dati_app["ultimo_profilo"] = utente_selezionato
     salva_dati(dati_app)
 st.session_state["profilo_precedente"] = utente_selezionato
+
+if dati_app.get("ultimo_salvataggio"):
+    st.caption(f"Ultimo salvataggio dei dati: {dati_app['ultimo_salvataggio']}")
 
 PAGINE = [
     "🍳 Pasto", "💊 Farmaci", "📅 Turni", "✅ Lista", "🗓️ Menu", "📖 Ricette", "📊 Oggi", "🩺 Vitali", "📈 Medie",

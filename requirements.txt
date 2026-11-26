@@ -1,5 +1,7 @@
 streamlit
 gspread
-pandas
 streamlit-autorefresh
 reportlab
+openpyxl
+tzdata
+

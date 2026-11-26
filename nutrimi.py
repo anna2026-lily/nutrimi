@@ -12,8 +12,22 @@ from xml.sax.saxutils import escape
 import gspread
 import streamlit as st
 
+
+def impostazione(nome, predefinito):
+    """Legge un'impostazione dai Secrets; se manca usa il valore predefinito."""
+    try:
+        return st.secrets.get(nome, predefinito)
+    except Exception:
+        return predefinito
+
+
+# Ogni copia dell'app può avere i suoi valori nei Secrets (vedi istruzioni)
+NOME_APP = str(impostazione("nome_app", "Nutrimi"))
+NOME_FOGLIO = str(impostazione("nome_foglio", "Nutrimi"))
+PROFILO_INIZIALE = str(impostazione("profilo_iniziale", "Anna"))
+
 st.set_page_config(
-    page_title="Nutrimi",
+    page_title=NOME_APP,
     page_icon="💧",
     layout="centered",
     initial_sidebar_state="collapsed",
@@ -38,7 +52,6 @@ div[role="radiogroup"] { gap: 0.3rem 0.8rem; }
 # ==========================================
 # CONFIGURAZIONE
 # ==========================================
-NOME_FOGLIO = "Nutrimi"
 NOME_SCHEDA_DATI = "Dati"
 
 CHIAVI = [
@@ -83,7 +96,11 @@ DATABASE_INIZIALE = {
     for nome, valori in DB_RAW.items()
 }
 
-NOMI_TURNI = ["Anna", "Luigi", "Lucia"]
+NOMI_TURNI = [
+    n.strip()
+    for n in str(impostazione("nomi_turni", "Anna, Luigi, Lucia")).split(",")
+    if n.strip()
+] or ["Anna", "Luigi", "Lucia"]
 GIORNI_IT = ["Lun", "Mar", "Mer", "Gio", "Ven", "Sab", "Dom"]
 
 MOMENTI_FARMACI = ["Mattina", "Pranzo", "Sera", "Notte", "Al bisogno"]
@@ -217,7 +234,7 @@ def carica_dati():
         return {
             "database": {k: dict(v) for k, v in DATABASE_INIZIALE.items()},
             "ricette": {},
-            "utenti": {"Anna": nuovo_utente()},
+            "utenti": {PROFILO_INIZIALE: nuovo_utente()},
         }
 
     dati = json.loads(testo)
@@ -232,7 +249,7 @@ def carica_dati():
     if not dati.get("database"):
         dati["database"] = {k: dict(v) for k, v in DATABASE_INIZIALE.items()}
     if not dati.get("utenti"):
-        dati["utenti"] = {"Anna": nuovo_utente()}
+        dati["utenti"] = {PROFILO_INIZIALE: nuovo_utente()}
 
     for u in dati["utenti"].values():
         u.setdefault("registro", {})
@@ -605,6 +622,143 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
     return buf.getvalue()
 
 
+def genera_excel(nome, registro, vitali, farmaci, farmaci_assunti, d_da, d_a):
+    """Tabella Excel: una riga per giorno, una colonna per ogni tipo di dato.
+    I pasti del giorno (con orari, ingredienti e note) stanno tutti nella stessa cella."""
+    from openpyxl import Workbook
+    from openpyxl.styles import Alignment, Border, Font, PatternFill, Side
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Giornaliero"
+    colonne = [
+        ("Data", 12), ("Pasti (dettaglio completo)", 62), ("Calorie (kcal)", 12),
+        ("Proteine (g)", 12), ("Carboidrati (g)", 14), ("Grassi (g)", 11),
+        ("Liquidi (ml)", 12), ("Pressione (mmHg)", 26), ("Saturazione SpO2 (%)", 20),
+        ("Glicemia (mg/dL)", 18), ("Temperatura (°C)", 14), ("Evacuazioni (n.)", 13),
+        ("Note evacuazione", 26), ("Pipì (n.)", 10), ("Farmaci assunti", 44),
+    ]
+    sottile = Side(style="thin", color="BBBBBB")
+    bordo = Border(left=sottile, right=sottile, top=sottile, bottom=sottile)
+    testo_alto = Alignment(wrap_text=True, vertical="top")
+    centro_alto = Alignment(horizontal="center", vertical="top")
+
+    ws.append([c[0] for c in colonne])
+    for i, (_, larghezza) in enumerate(colonne, start=1):
+        cella = ws.cell(row=1, column=i)
+        cella.font = Font(bold=True, color="FFFFFF")
+        cella.fill = PatternFill("solid", fgColor="1F4E78")
+        cella.alignment = Alignment(wrap_text=True, horizontal="center", vertical="center")
+        cella.border = bordo
+        ws.column_dimensions[cella.column_letter].width = larghezza
+    ws.row_dimensions[1].height = 32
+    ws.freeze_panes = "B2"
+
+    mappa_farmaci = {f["id"]: f for f in farmaci}
+
+    def testo_pasto(nome_p, i):
+        righe = [f"{i['ora']} · {nome_p}" if i.get("ora") else nome_p]
+        ingr = ", ".join(
+            f"{k} {q:g}" for k, q in i.get("ingredienti", {}).items() if q > 0
+        )
+        if ingr:
+            righe.append(f"Ingredienti: {ingr}")
+        n = i.get("nutrienti", {})
+        parti = []
+        if i.get("quantita_consumata"):
+            parti.append(f"consumati {i['quantita_consumata']:g} g/ml")
+        parti.append(f"{n.get('kcal', 0):.0f} kcal")
+        righe.append("Porzione: " + " · ".join(parti))
+        if i.get("nota"):
+            righe.append(f"Nota: {i['nota']}")
+        return "\n".join(righe)
+
+    for g in giorni_periodo(d_da, d_a):
+        gs = str(g)
+        piatti = registro.get(gs, {})
+        v = vitali.get(gs, {})
+        pressioni = leggi_pressioni(v)
+        saturazioni = leggi_saturazioni(v)
+        glicemie = leggi_glicemie(v)
+
+        farm = []
+        for fid, val in farmaci_assunti.get(gs, {}).items():
+            f = mappa_farmaci.get(fid)
+            if not f:
+                continue
+            nome_f = f["nome"] + (f" {f['dose']}" if f.get("dose") else "")
+            for sm in somministrazioni(val):
+                riga = f"{sm.get('ora') or '—'} - {nome_f}"
+                if f.get("momento") == "Al bisogno" or sm.get("motivo"):
+                    riga += " (al bisogno" + (
+                        f", motivo: {sm['motivo']}" if sm.get("motivo") else ""
+                    ) + ")"
+                farm.append((sm.get("ora") or "99:99", riga))
+        farm.sort()
+
+        temperatura = v.get("temperatura") or 0
+        if not (piatti or pressioni or saturazioni or glicemie or temperatura
+                or "evacuazioni" in v or "pipi" in v or farm):
+            continue
+
+        ordinati = sorted(piatti.items(), key=lambda kv: kv[1].get("ora") or "99:99")
+        tot = calcola_totali_giorno(piatti) if piatti else None
+        riga_xl = [
+            g,
+            "\n\n".join(testo_pasto(n_p, i_p) for n_p, i_p in ordinati),
+            round(tot["kcal"]) if tot else None,
+            round(tot["prot"], 1) if tot else None,
+            round(tot["carb"], 1) if tot else None,
+            round(tot["grassi"], 1) if tot else None,
+            round(tot["acqua"]) if tot else None,
+            "\n".join(
+                f"{m.get('ora') or m.get('momento') or '—'} - {m['sys']}/{m['dia']}"
+                + (f" (polso {m['puls']})" if m.get("puls") else "")
+                for m in pressioni
+            ),
+            "\n".join(f"{m.get('ora') or '—'} - {m['valore']}%" for m in saturazioni),
+            "\n".join(f"{m.get('ora') or '—'} - {m['valore']}" for m in glicemie),
+            float(temperatura) if temperatura else None,
+            int(v["evacuazioni"]) if "evacuazioni" in v else None,
+            v.get("evacuazione_note") or None,
+            int(v["pipi"]) if "pipi" in v else None,
+            "\n".join(r for _, r in farm),
+        ]
+        ws.append(riga_xl)
+        r = ws.max_row
+        for c in range(1, len(colonne) + 1):
+            cella = ws.cell(row=r, column=c)
+            cella.border = bordo
+            cella.alignment = testo_alto if c in (2, 8, 9, 10, 13, 15) else centro_alto
+        ws.cell(row=r, column=1).number_format = "DD/MM/YYYY"
+        for c in (3, 7):
+            ws.cell(row=r, column=c).number_format = "0"
+        for c in (4, 5, 6):
+            ws.cell(row=r, column=c).number_format = "0.0"
+        ws.cell(row=r, column=11).number_format = "0.0"
+
+    ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=len(colonne)).column_letter}{max(ws.max_row, 1)}"
+
+    info = wb.create_sheet("Info")
+    info.append(["Paziente", nome])
+    info.append(["Periodo", f"{it_data(d_da)} - {it_data(d_a)}"])
+    info.append(["Generato il", it_data(ora_italiana().date())])
+    info.append([
+        "Nota",
+        "Dati inseriti manualmente nell'app. I valori nutrizionali sono stime "
+        "calcolate da tabelle di riferimento e non sostituiscono il parere medico.",
+    ])
+    info.column_dimensions["A"].width = 16
+    info.column_dimensions["B"].width = 90
+    for riga in info.iter_rows():
+        riga[0].font = Font(bold=True)
+        riga[1].alignment = Alignment(wrap_text=True, vertical="top")
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
+
+
 def ricalcola_piatto(info, nuove_qta, nuovo_vol, nuova_cons, db):
     """Nuovi nutrienti della porzione dopo la modifica di ingredienti,
     volume totale o quantità consumata. None se non calcolabile."""
@@ -640,7 +794,7 @@ _RIF["base"] = copy.deepcopy(dati_app)
 # ==========================================
 # INTESTAZIONE: PROFILO E MENU A PAGINE
 # ==========================================
-st.title("💧 Nutrimi")
+st.title(f"💧 {NOME_APP}")
 
 utenti_disponibili = list(dati_app["utenti"].keys())
 if "profilo_da_selezionare" in st.session_state:
@@ -2485,22 +2639,28 @@ elif pagina == "📄 Esporta":
                 " requirements.txt su GitHub."
             )
 
-        st.markdown("##### 📊 Tabelle per Excel")
-        st.download_button(
-            "⬇️ Pasti (CSV)",
-            data=genera_csv_pasti(registro_utente, d_da, d_a),
-            file_name=f"nutrimi_pasti_{nome_file}.csv",
-            mime="text/csv",
-        )
-        st.download_button(
-            "⬇️ Parametri vitali (CSV)",
-            data=genera_csv_vitali(parametri_vitali_utente, d_da, d_a),
-            file_name=f"nutrimi_vitali_{nome_file}.csv",
-            mime="text/csv",
-        )
+        st.markdown("##### 📊 Tabella Excel (una riga per giorno)")
+        try:
+            excel_bytes = genera_excel(
+                utente_selezionato, registro_utente, parametri_vitali_utente,
+                dati_utente.get("farmaci", []), dati_utente.get("farmaci_assunti", {}),
+                d_da, d_a,
+            )
+            st.download_button(
+                "⬇️ Scarica Excel (.xlsx)",
+                data=excel_bytes,
+                file_name=f"nutrimi_{nome_file}.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+        except ImportError:
+            st.error(
+                "Manca la libreria per Excel: aggiungi 'openpyxl' al file"
+                " requirements.txt su GitHub."
+            )
         st.caption(
             "Il PDF riassume medie, parametri vitali e pasti giorno per giorno."
-            " I file CSV si aprono con Excel e contengono il dettaglio."
+            " L'Excel ha una riga per giorno e una colonna per ogni tipo di dato:"
+            " i pasti del giorno, con orari e note, stanno tutti nella stessa cella."
         )
 
 # ==========================================

@@ -386,6 +386,39 @@ def leggi_glicemie(v):
     return list(v.get("glicemie", []))
 
 
+def riepilogo_settimane(vitali, farmaci, d_da, d_a, oggi):
+    """Per ogni settimana (lunedì-domenica) tra d_da e d_a: giornate UP, DOWN,
+    non valutate (fino a oggi) e farmaci iniziati o sospesi in quella settimana."""
+    settimane = []
+    lunedi = d_da - timedelta(days=d_da.weekday())
+    while lunedi <= d_a:
+        domenica = lunedi + timedelta(days=6)
+        up = down = nd = 0
+        for i in range(7):
+            g = lunedi + timedelta(days=i)
+            val = vitali.get(str(g), {}).get("giornata")
+            if val == "up":
+                up += 1
+            elif val == "down":
+                down += 1
+            elif g <= oggi:
+                nd += 1
+        cambi = []
+        for f in farmaci:
+            nome_f = f["nome"] + (f" {f['dose']}" if f.get("dose") else "")
+            ini, fin = f.get("inizio"), f.get("fine")
+            if ini and str(lunedi) <= ini <= str(domenica):
+                cambi.append(f"{nome_f} iniziato il {ini[8:10]}/{ini[5:7]}")
+            if fin and str(lunedi) <= fin <= str(domenica):
+                cambi.append(f"{nome_f} sospeso dal {fin[8:10]}/{fin[5:7]}")
+        settimane.append({
+            "lunedi": lunedi, "domenica": domenica,
+            "up": up, "down": down, "nd": nd, "cambi": cambi,
+        })
+        lunedi += timedelta(days=7)
+    return settimane
+
+
 def leggi_saturazioni(v):
     """Misurazioni di saturazione di un giorno: [{'ora': 'HH:MM' o '', 'valore': n}].
     Legge anche il vecchio valore singolo salvato prima dell'elenco."""
@@ -474,7 +507,7 @@ def genera_csv_vitali(vitali, d_da, d_a):
     return out.getvalue().encode("utf-8-sig")
 
 
-def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
+def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a, farmaci=None):
     from reportlab.lib import colors
     from reportlab.lib.pagesizes import A4
     from reportlab.lib.styles import ParagraphStyle, getSampleStyleSheet
@@ -551,7 +584,7 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
 
     # --- Parametri vitali ---
     el.append(Paragraph("Parametri vitali", sezione))
-    righe = [["Data", "Pressione", "SpO2", "Glicemia", "Temp.", "Evac.", "Pipì"]]
+    righe = [["Data", "Pressione", "SpO2", "Glicemia", "Temp.", "Evac.", "Pipì", "Giornata"]]
     note_evac = []
     for g in giorni:
         v = vitali.get(str(g))
@@ -576,9 +609,10 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
             f"{num_it(v['temperatura'])} °C" if v.get("temperatura") else "-",
             v.get("evacuazioni") if "evacuazioni" in v else "-",
             v.get("pipi") if "pipi" in v else "-",
+            {"up": "UP", "down": "DOWN"}.get(v.get("giornata"), "-"),
         ])
     if len(righe) > 1:
-        t = Table(righe, colWidths=[2.0 * cm, 5.2 * cm, 3.2 * cm, 3.0 * cm, 1.7 * cm, 1.0 * cm, 1.0 * cm], repeatRows=1)
+        t = Table(righe, colWidths=[2.0 * cm, 4.2 * cm, 3.2 * cm, 3.0 * cm, 1.7 * cm, 1.0 * cm, 1.0 * cm, 1.7 * cm], repeatRows=1)
         t.setStyle(TableStyle(stile_tab))
         el.append(t)
         if note_evac:
@@ -587,6 +621,23 @@ def genera_pdf(nome, anagrafica, obiettivi, registro, vitali, d_da, d_a):
                 "<b>Note evacuazione:</b> " + escape("; ".join(note_evac)), piccolo))
     else:
         el.append(Paragraph("Nessun parametro vitale registrato nel periodo.", normale))
+
+    # --- Andamento delle giornate (UP / DOWN) ---
+    sett_pdf = riepilogo_settimane(
+        vitali, farmaci or [], d_da, d_a, ora_italiana().date()
+    )
+    if any(w["up"] or w["down"] for w in sett_pdf):
+        el.append(Paragraph("Andamento delle giornate (UP / DOWN)", sezione))
+        righe_s = [["Settimana", "UP", "DOWN", "Non valutate", "Cambi di terapia"]]
+        for w in sett_pdf:
+            righe_s.append([
+                f"{it_data(w['lunedi'])[:5]} - {it_data(w['domenica'])[:5]}",
+                w["up"], w["down"], w["nd"],
+                Paragraph(escape("; ".join(w["cambi"]) or "-"), piccolo),
+            ])
+        t = Table(righe_s, colWidths=[3.2 * cm, 1.5 * cm, 1.8 * cm, 2.6 * cm, 8.4 * cm], repeatRows=1)
+        t.setStyle(TableStyle(stile_tab))
+        el.append(t)
 
     # --- Dettaglio giornaliero ---
     el.append(Paragraph("Dettaglio giornaliero dei pasti", sezione))
@@ -637,6 +688,7 @@ def genera_excel(nome, registro, vitali, farmaci, farmaci_assunti, d_da, d_a):
         ("Liquidi (ml)", 12), ("Pressione (mmHg)", 26), ("Saturazione SpO2 (%)", 20),
         ("Glicemia (mg/dL)", 18), ("Temperatura (°C)", 14), ("Evacuazioni (n.)", 13),
         ("Note evacuazione", 26), ("Pipì (n.)", 10), ("Farmaci assunti", 44),
+        ("Giornata (UP/DOWN)", 14), ("Nota sulla giornata", 34),
     ]
     sottile = Side(style="thin", color="BBBBBB")
     bordo = Border(left=sottile, right=sottile, top=sottile, bottom=sottile)
@@ -698,7 +750,8 @@ def genera_excel(nome, registro, vitali, farmaci, farmaci_assunti, d_da, d_a):
 
         temperatura = v.get("temperatura") or 0
         if not (piatti or pressioni or saturazioni or glicemie or temperatura
-                or "evacuazioni" in v or "pipi" in v or farm):
+                or "evacuazioni" in v or "pipi" in v or farm or v.get("giornata")
+                or v.get("giornata_nota")):
             continue
 
         ordinati = sorted(piatti.items(), key=lambda kv: kv[1].get("ora") or "99:99")
@@ -723,21 +776,43 @@ def genera_excel(nome, registro, vitali, farmaci, farmaci_assunti, d_da, d_a):
             v.get("evacuazione_note") or None,
             int(v["pipi"]) if "pipi" in v else None,
             "\n".join(r for _, r in farm),
+            {"up": "UP", "down": "DOWN"}.get(v.get("giornata")),
+            v.get("giornata_nota") or None,
         ]
         ws.append(riga_xl)
         r = ws.max_row
         for c in range(1, len(colonne) + 1):
             cella = ws.cell(row=r, column=c)
             cella.border = bordo
-            cella.alignment = testo_alto if c in (2, 8, 9, 10, 13, 15) else centro_alto
+            cella.alignment = testo_alto if c in (2, 8, 9, 10, 13, 15, 17) else centro_alto
         ws.cell(row=r, column=1).number_format = "DD/MM/YYYY"
         for c in (3, 7):
             ws.cell(row=r, column=c).number_format = "0"
         for c in (4, 5, 6):
             ws.cell(row=r, column=c).number_format = "0.0"
         ws.cell(row=r, column=11).number_format = "0.0"
+        if v.get("giornata") in ("up", "down"):
+            cg = ws.cell(row=r, column=16)
+            cg.fill = PatternFill(
+                "solid", fgColor="23813F" if v["giornata"] == "up" else "C93A3A"
+            )
+            cg.font = Font(bold=True, color="FFFFFF")
 
     ws.auto_filter.ref = f"A1:{ws.cell(row=1, column=len(colonne)).column_letter}{max(ws.max_row, 1)}"
+
+    sett_ws = wb.create_sheet("Settimane")
+    sett_ws.append(["Settimana", "Giornate UP", "Giornate DOWN", "Non valutate", "Cambi di terapia"])
+    for w in riepilogo_settimane(vitali, farmaci, d_da, d_a, ora_italiana().date()):
+        sett_ws.append([
+            f"{it_data(w['lunedi'])[:5]} - {it_data(w['domenica'])[:5]}",
+            w["up"], w["down"], w["nd"], "; ".join(w["cambi"]) or None,
+        ])
+    for i, larghezza in enumerate((16, 13, 15, 14, 60), start=1):
+        sett_ws.column_dimensions[sett_ws.cell(row=1, column=i).column_letter].width = larghezza
+    for cella in sett_ws[1]:
+        cella.font = Font(bold=True, color="FFFFFF")
+        cella.fill = PatternFill("solid", fgColor="1F4E78")
+        cella.alignment = Alignment(horizontal="center", vertical="center", wrap_text=True)
 
     info = wb.create_sheet("Info")
     info.append(["Paziente", nome])
@@ -2130,6 +2205,179 @@ elif pagina == "🩺 Vitali":
         st.session_state["evac_note"] = str(vit_giorno.get("evacuazione_note", ""))
         st.session_state["pipi_n"] = int(vit_giorno.get("pipi", 0))
 
+    # ---- Valutazione generale della giornata: UP / DOWN ----
+    st.markdown("**🌤️ Com'è andata la giornata?**")
+    st.caption(
+        "Valutazione generale di chi assiste: sofferenza, lamentele, appetito,"
+        " vigilanza... Serve a vedere quante giornate UP e DOWN ci sono in settimana."
+    )
+    giornata_att = vit_giorno.get("giornata")
+    if giornata_att == "up":
+        st.success("⬆️ Giornata UP")
+    elif giornata_att == "down":
+        st.error("⬇️ Giornata DOWN")
+    else:
+        st.info("Giornata non ancora valutata.")
+
+    st.markdown(
+        "<style>"
+        ".st-key-giornata_up button, .st-key-giornata_up button:hover,"
+        " .st-key-giornata_up button:focus, .st-key-giornata_up button:active"
+        " { background-color: #23813f !important; border-color: #23813f !important;"
+        " color: #ffffff !important; }"
+        " .st-key-giornata_up button p { color: #ffffff !important; font-weight: 700; }"
+        " .st-key-giornata_down button, .st-key-giornata_down button:hover,"
+        " .st-key-giornata_down button:focus, .st-key-giornata_down button:active"
+        " { background-color: #c93a3a !important; border-color: #c93a3a !important;"
+        " color: #ffffff !important; }"
+        " .st-key-giornata_down button p { color: #ffffff !important; font-weight: 700; }"
+        "</style>",
+        unsafe_allow_html=True,
+    )
+
+    def salva_giornata(valore):
+        leggi_da_sheet.clear()
+        d_fresco = carica_dati()
+        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+        if u_fresco is None:
+            return
+        giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+        if valore is None:
+            giorno_v.pop("giornata", None)
+        else:
+            giorno_v["giornata"] = valore
+        if not giorno_v:
+            u_fresco["parametri_vitali"].pop(data_v_str, None)
+        salva_dati(d_fresco)
+
+    NOME_G = {"up": "UP", "down": "DOWN"}
+    cambio_g = st.session_state.get("giornata_cambio")
+    togli_g = st.session_state.get("giornata_togli")
+    if cambio_g and cambio_g[0] == data_v_str and giornata_att:
+        nuovo_g = cambio_g[1]
+        st.warning(
+            f"La giornata del {data_v_str} è segnata **{NOME_G[giornata_att]}**."
+            f" Vuoi cambiarla in **{NOME_G[nuovo_g]}**?"
+        )
+        if st.button(f"✅ Sì, cambia in {NOME_G[nuovo_g]}", key="giornata_si_cambio"):
+            salva_giornata(nuovo_g)
+            st.session_state.pop("giornata_cambio", None)
+            st.session_state["toast_msg_v"] = f"Giornata cambiata in {NOME_G[nuovo_g]}"
+            st.rerun()
+        if st.button("↩️ No, lascia com'è", key="giornata_no_cambio"):
+            st.session_state.pop("giornata_cambio", None)
+            st.rerun()
+    elif togli_g == data_v_str and giornata_att:
+        st.warning(f"Togliere la valutazione ({NOME_G[giornata_att]}) del {data_v_str}?")
+        if st.button("✅ Sì, togli", key="giornata_si_togli"):
+            salva_giornata(None)
+            st.session_state.pop("giornata_togli", None)
+            st.session_state["toast_msg_v"] = "Valutazione tolta"
+            st.rerun()
+        if st.button("↩️ No, lascia", key="giornata_no_togli"):
+            st.session_state.pop("giornata_togli", None)
+            st.rerun()
+    else:
+        if st.button("⬆️  UP · giornata buona", key="giornata_up", use_container_width=True):
+            if giornata_att is None:
+                salva_giornata("up")
+                st.session_state["toast_msg_v"] = "✅ Giornata segnata UP"
+                st.rerun()
+            elif giornata_att != "up":
+                st.session_state["giornata_cambio"] = (data_v_str, "up")
+                st.rerun()
+        if st.button("⬇️  DOWN · giornata difficile", key="giornata_down", use_container_width=True):
+            if giornata_att is None:
+                salva_giornata("down")
+                st.session_state["toast_msg_v"] = "✅ Giornata segnata DOWN"
+                st.rerun()
+            elif giornata_att != "down":
+                st.session_state["giornata_cambio"] = (data_v_str, "down")
+                st.rerun()
+        if giornata_att and st.button("↩️ Togli la valutazione", key="giornata_togli_btn"):
+            st.session_state["giornata_togli"] = data_v_str
+            st.rerun()
+
+    nota_g_att = vit_giorno.get("giornata_nota", "")
+    firma_g = hashlib.md5(nota_g_att.encode("utf-8")).hexdigest()[:6]
+    with st.form(f"form_giornata_nota_{utente_selezionato}_{data_v_str}"):
+        nota_g = st.text_input(
+            "Nota sulla giornata (facoltativa)",
+            value=nota_g_att,
+            placeholder="es. ha mangiato poco, molto sonno...",
+            key=f"giornata_nota_{utente_selezionato}_{data_v_str}_{firma_g}",
+        )
+        salva_nota_g = st.form_submit_button("💾 Salva nota")
+    if salva_nota_g:
+        leggi_da_sheet.clear()
+        d_fresco = carica_dati()
+        u_fresco = d_fresco["utenti"].get(utente_selezionato)
+        if u_fresco is not None:
+            giorno_v = u_fresco.setdefault("parametri_vitali", {}).setdefault(data_v_str, {})
+            if nota_g.strip():
+                giorno_v["giornata_nota"] = nota_g.strip()
+            else:
+                giorno_v.pop("giornata_nota", None)
+            if not giorno_v:
+                u_fresco["parametri_vitali"].pop(data_v_str, None)
+            salva_dati(d_fresco)
+            st.session_state["toast_msg_v"] = "✅ Nota salvata"
+            st.rerun()
+
+    # settimana della data scelta: quadro a colori
+    lunedi_v = data_v - timedelta(days=data_v.weekday())
+    giorni_v = [lunedi_v + timedelta(days=i) for i in range(7)]
+    oggi_v = ora_italiana().date()
+    intest_v = "".join(
+        f'<th style="padding:4px;font-size:0.8rem">{GIORNI_IT[g.weekday()]}<br>{g:%d/%m}</th>'
+        for g in giorni_v
+    )
+    celle_v = ""
+    n_up = n_down = n_nd = 0
+    for g in giorni_v:
+        val = parametri_vitali_utente.get(str(g), {}).get("giornata")
+        if val == "up":
+            sfondo, simbolo = "#23813f", "▲"
+            n_up += 1
+        elif val == "down":
+            sfondo, simbolo = "#c93a3a", "▼"
+            n_down += 1
+        else:
+            sfondo, simbolo = "#6b7280", "–"
+            if g <= oggi_v:
+                n_nd += 1
+        celle_v += (
+            f'<td style="background:{sfondo};color:white;font-size:1.3rem;'
+            f'padding:10px 2px;border:2px solid #0e1117">{simbolo}</td>'
+        )
+    st.markdown(
+        '<table style="width:100%;border-collapse:collapse;text-align:center">'
+        f"<tr>{intest_v}</tr><tr>{celle_v}</tr></table>",
+        unsafe_allow_html=True,
+    )
+    st.caption(
+        f"Settimana dal {giorni_v[0]:%d/%m} al {giorni_v[-1]:%d/%m}: "
+        f"⬆️ {n_up} UP · ⬇️ {n_down} DOWN · ⚪ {n_nd} non valutate"
+    )
+    with st.expander("📊 Ultime 8 settimane e cambi di terapia"):
+        sett = riepilogo_settimane(
+            parametri_vitali_utente, dati_utente.get("farmaci", []),
+            oggi_v - timedelta(days=49), oggi_v, oggi_v,
+        )
+        righe_t = ["| Settimana | ⬆️ UP | ⬇️ DOWN | ⚪ | Cambi di terapia |", "|---|---|---|---|---|"]
+        for w in reversed(sett):
+            righe_t.append(
+                f"| {w['lunedi']:%d/%m} – {w['domenica']:%d/%m} | {w['up']} | {w['down']}"
+                f" | {w['nd']} | {'; '.join(w['cambi']) or '—'} |"
+            )
+        st.markdown("\n".join(righe_t))
+        st.caption(
+            "I cambi di terapia sono i farmaci iniziati o sospesi dall'app: servono"
+            " a confrontare le settimane prima e dopo ogni cambiamento."
+        )
+
+    st.markdown("---")
+
     st.markdown("**🔴 Pressione**")
     misure_pr = leggi_pressioni(vit_giorno)
     if misure_pr:
@@ -2626,6 +2874,7 @@ elif pagina == "📄 Esporta":
             pdf_bytes = genera_pdf(
                 utente_selezionato, anagrafica_utente, obiettivi_utente,
                 registro_utente, parametri_vitali_utente, d_da, d_a,
+                dati_utente.get("farmaci", []),
             )
             st.download_button(
                 "⬇️ Scarica il PDF",
